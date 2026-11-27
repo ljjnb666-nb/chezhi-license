@@ -228,3 +228,44 @@ instances without another service. Redis could reduce rate-bucket
 contention at higher load but would require a second service and an explicit
 security/failure model for revocation and recovery. Measure contention
 before revisiting that choice.
+
+## P5 signed-license capacity and operations acceptance
+
+The standalone CI now includes a bounded V2 workload on a disposable
+PostgreSQL database and two real HTTPS instances. Sixteen worker threads
+perform 32 signed renewals of one already-bound synthetic card, obtaining
+the challenge on one instance and completing it on the other. Every
+credential is checked independently with OpenSSL; the card and binding
+snapshots must stay unchanged. A separate eight-way duplicate-proof race
+must yield one success and seven denials. Public request metrics must
+account for all 73 HTTP requests (37/36 per instance), with zero additional
+5xx errors. Rate buckets are reset only in the isolated fixture between
+workloads. Normal production limits are not modified.
+
+The output reports challenge-plus-client-signing, renewal and end-to-end
+P50/P95/P99/max, throughput and pool state. It includes fresh TLS
+connections and local OpenSSL process startup; the values are not pure
+server processing latency. Independent response verification is outside
+the timed workload. Same-card contention is deliberate; this is a short
+functional capacity regression, not a production peak-load or sustained
+load claim. The existing 10,000/100,000-card dashboard benchmark and
+independent database restore and rotation tests remain mandatory evidence.
+
+Before deployment, select a production concurrency/renewal budget based
+on the intended number of licensed users and renewal interval. Run an
+authorized isolated load profile with distinct devices/cards, representative
+rate limits, mixed issuance/revocation/read traffic, and longer duration.
+Record accepted/denied/429/503 counts, request percentiles, connection-pool
+wait deltas, process memory and CPU, database size, and recovery timings.
+Keep the diagnostics listener private. Monitor readiness failure, 5xx
+error-rate increases and pool saturation; the cumulative error counter
+counts 5xx only, not normal denials or throttling. Do not infer percentiles
+from the timing sum. Use workload latency measurements or a separately
+validated histogram when required.
+
+Set and document RPO/RTO and backup retention before deployment. Existing
+native logical recovery tests validate data and trust scope but do not
+establish a production recovery time or a PITR guarantee. Verify restores
+to newly named isolated databases, reconcile post-backup writes and keep
+the production deployment unchanged until owner-approved acceptance.
+No campus-network or elevated-client operation is involved.
