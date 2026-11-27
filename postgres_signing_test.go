@@ -55,6 +55,9 @@ func TestPostgresSigningPolicyV2(t *testing.T) {
 	publicHex:=hex.EncodeToString(pub)
 	if err:=s.pg.setSigningPolicy(ctx,name,"none",publicHex);err!=nil{t.Fatal(err)}
 	if err:=s.pg.setSigningPolicy(ctx,name,"none",publicHex);err==nil{t.Fatal("policy reinitialized")}
+	// The legacy import guard runs before inspecting legacy content; this
+	// deliberately empty input exercises the new security boundary directly.
+	if err:=s.pg.importLegacy(ctx,legacyData{});err==nil || err.Error()!="legacy import must precede signing policy initialization"{t.Fatal("legacy import bypassed active signing policy",err)}
 	if err:=s.pg.verifyDatabase(ctx,"--migrator");err!=nil{t.Fatal(err)}
 	t.Setenv("CHEZHI_SIGNING_KEY_FILE","")
 	if _,err:=s.pg.configureSigner(ctx);err==nil{t.Fatal("missing signer accepted")}
@@ -141,6 +144,7 @@ func TestPostgresSigningPolicyV2(t *testing.T) {
 	currentID:=sha256.Sum256(pub)
 	newHex:=hex.EncodeToString(newPub)
 	if err:=peer.setSigningPolicy(ctx,name,fmt.Sprintf("%x",currentID),newHex);err==nil{lease();t.Fatal("online rotation accepted")}
+	if err:=peer.importLegacy(ctx,legacyData{});err==nil || err.Error()!="stop every instance before legacy import"{lease();t.Fatal("online legacy import accepted",err)}
 	lease()
 	if err:=peer.setSigningPolicy(ctx,name,fmt.Sprintf("%x",currentID),newHex);err!=nil{t.Fatal(err)}
 	if _,err:=peer.configureSigner(ctx);err==nil{t.Fatal("old private key accepted after rotation")}
