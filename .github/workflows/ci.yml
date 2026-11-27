@@ -59,6 +59,99 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           (Get-FileHash bin/chezhi-license-win-x64.exe -Algorithm SHA256).Hash
       - if: runner.os == 'Windows'
+        name: Build native SDK and exercise .NET Framework ABI
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $gcc = Get-Command gcc.exe -ErrorAction SilentlyContinue
+          if (-not $gcc) {
+            $candidate = 'C:\mingw64\bin\gcc.exe'
+            if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) { throw 'x64 MinGW gcc unavailable on runner' }
+            $env:Path = (Split-Path -Parent $candidate) + ';' + $env:Path
+            $gcc = Get-Command gcc.exe
+          }
+          $machine = (& $gcc.Source -dumpmachine)
+          if ($LASTEXITCODE -ne 0 -or $machine -notmatch '^x86_64.*mingw') { throw "Unexpected native toolchain: $machine" }
+          & $gcc.Source --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:CGO_ENABLED = '1'
+          $env:GOOS = 'windows'
+          $env:GOARCH = 'amd64'
+          $env:CC = $gcc.Source
+          go build -trimpath -buildmode=c-shared -o bin/chezhi_license_sdk.dll ./cmd/windows-license-sdk
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+          $smoke = (Resolve-Path -LiteralPath 'sdk/windows/AbiSmoke.cs').Path
+          $abiOut = Join-Path $PWD 'bin\AbiSmoke.exe'
+          & $csc /nologo /target:exe /platform:x64 "/out:$abiOut" $smoke
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & ./bin/AbiSmoke.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          (Get-FileHash bin/chezhi_license_sdk.dll -Algorithm SHA256).Hash
+      - if: runner.os == 'Windows'
+        name: Windows persistent CNG software key lifecycle
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+          $src = (Resolve-Path -LiteralPath 'sdk/windows/WindowsDeviceKey.cs').Path
+          $test = (Resolve-Path -LiteralPath 'sdk/windows/DeviceKeySmoke.cs').Path
+          $exe = Join-Path $PWD 'bin\DeviceKeySmoke.exe'
+          & $csc /nologo /target:exe /platform:x64 /r:System.Core.dll "/out:$exe" $src $test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $slot = [Guid]::NewGuid().ToString()
+          $fingerprint = (& $exe create $slot | Select-Object -Last 1)
+          if ($LASTEXITCODE -ne 0 -or $fingerprint -notmatch '^[0-9a-f]{64}$') { throw 'CNG enrollment fixture failed' }
+          try {
+            & $exe reopen $slot $fingerprint
+            if ($LASTEXITCODE -ne 0) { throw 'CNG reopen fixture failed' }
+          } finally {
+            & $exe cleanup $slot $fingerprint
+            if ($LASTEXITCODE -ne 0) { throw 'CNG fixture cleanup failed' }
+          }
+      - if: runner.os == 'Windows'
+        name: Windows DPAPI enrollment transaction and crash recovery
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+          $src = (Resolve-Path -LiteralPath 'sdk/windows/WindowsDeviceKey.cs').Path
+          $enrollment = (Resolve-Path -LiteralPath 'sdk/windows/DeviceEnrollment.cs').Path
+          $test = (Resolve-Path -LiteralPath 'sdk/windows/EnrollmentSmoke.cs').Path
+          $exe = Join-Path $PWD 'bin\EnrollmentSmoke.exe'
+          & $csc /nologo /target:exe /platform:x64 /define:CHEZHI_SDK_TEST /r:System.Core.dll /r:System.Security.dll "/out:$exe" $src $enrollment $test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - if: runner.os == 'Windows'
+        name: Authorization state and concurrency invariants
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+          $src = (Resolve-Path -LiteralPath 'sdk/windows/AuthorizationState.cs').Path
+          $test = (Resolve-Path -LiteralPath 'sdk/windows/AuthorizationStateSmoke.cs').Path
+          $exe = Join-Path $PWD 'bin\AuthorizationStateSmoke.exe'
+          & $csc /nologo /target:exe /platform:x64 "/out:$exe" $src $test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - if: runner.os == 'Windows'
+        name: Windows native online interop and coordinator
+        timeout-minutes: 4
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:CGO_ENABLED = '0'
+          go build -tags sdkfixture -trimpath -o bin/SdkTestServer.exe ./cmd/sdk-test-server
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+          $sources = @('AuthorizationState.cs','WindowsDeviceKey.cs','NativeLicenseClient.cs','LicenseCoordinator.cs','OnlineSmoke.cs') | ForEach-Object { (Resolve-Path -LiteralPath ('sdk/windows/'+$_)).Path }
+          $exe = Join-Path $PWD 'bin\OnlineSmoke.exe'
+          & $csc /nologo /target:exe /platform:x64 /r:System.Core.dll "/out:$exe" $sources
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & ./sdk/windows/Run-OnlineSmoke.ps1 -Bin bin
+      - if: runner.os == 'Windows'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: windows-x64-ci-build
@@ -78,6 +171,15 @@ jobs:
         with:
           go-version: '1.26.11'
           cache: false
+      - name: Python acceptance syntax preflight
+        run: |
+          python3 - <<'PY'
+          import ast
+          import pathlib
+          for path in sorted(pathlib.Path('.').glob('*.py')) + sorted(pathlib.Path('migration').rglob('*.py')):
+              ast.parse(path.read_text(encoding='utf-8'), filename=str(path))
+          print("PYTHON_ACCEPTANCE_SYNTAX_PASS")
+          PY
       - name: Build and run live HTTP tests
         shell: bash
         run: |
