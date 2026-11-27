@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/hex"
@@ -69,6 +70,10 @@ func decodeStoredChallenge(nonce string, payload []byte, expires int64) (proof.C
 	var c proof.Challenge
 	if len(payload) == 0 || len(payload) > 4096 || json.Unmarshal(payload, &c) != nil ||
 		hex.EncodeToString(c.Nonce[:]) != nonce || c.ExpiresAt != expires {
+		return proof.Challenge{}, errDatabase
+	}
+	canonical, err := json.Marshal(c)
+	if err != nil || !bytes.Equal(canonical, payload) {
 		return proof.Challenge{}, errDatabase
 	}
 	if _, err := c.Transcript(); err != nil {
