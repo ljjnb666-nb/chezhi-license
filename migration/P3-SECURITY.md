@@ -74,7 +74,7 @@ verification until the full policy and P4 storage/time boundary are validated.
 A deterministic challenge transcript hash fixture is included in proof_test.go.
 No live signing keys or device credentials are committed.
 
-## V5 challenge persistence (implemented; integration CI pending)
+## V5 challenge persistence (real PostgreSQL test passed; full container revalidation pending)
 
 V5 adds a dedicated `chezhi_challenges` table with bounded canonical payloads,
 nonce primary key and expiry index. The database clock determines validity.
@@ -100,12 +100,40 @@ capacity, corrupt payload rejection, deep checks and mode-switch invalidation.
 Actual license mutations, multiple HTTP processes and restore replay tests
 remain part of the later integration gate.
 
+## V6 secure binding foundation (implementation; CI pending)
+
+A permanent row in `chezhi_secure_bindings` marks a card as requiring
+cryptographic proof. It stores the canonical public point and a monotonic
+revision; the existing card device field holds the public point fingerprint.
+First secure activation requires an unbound card. Existing legacy bindings
+require an explicit administrator unbind before enrollment. Administrator
+unbind/revoke clears the secure public key and advances its revision, but
+never removes the marker. A subsequent secure rebind preserves the original
+activation and expiry. All existing v1/browser/demo licensing paths use a
+shared legacy guard; protected cards return `secure_protocol_required`,
+including after unbind. Authorization writes lock the card before changing
+security metadata. Read-only legacy decisions use one consistent snapshot.
+
+Business ZIP backup is refused if secure markers exist: the old JSON format
+cannot faithfully restore the marker and revision. Use native PostgreSQL
+backup and reconcile post-backup security changes. Existing CSV remains a
+report, not a recoverable authorization store. V6 checks schema, grants and
+public-key/fingerprint consistency. Reapply runtime grants offline.
+
+The internal `lockSecureCard` primitive is not an HTTP route. Its caller
+must consume a valid challenge on the same transaction and check that the
+challenge's authorization epoch is still current. This epoch fencing is
+NOT yet implemented. The existing V5 challenge does not bind the revision.
+Do not expose this primitive via HTTP until revision fencing, keyring and
+commit-confirmed credential issuance are complete. The lifecycle fixture
+uses fresh proofs and tests the storage boundary only.
+
 ## Required integration work (not yet implemented)
 
-- V6+ migration: explicit secure binding state, monotonic authorization
-  revisions, public-key metadata and keyring policy.
-- Integrate the V5 atomic consumption callback with actual card/identity
-  mutation and authorization revision rules. Repeated signatures alone are
+- V7+ migration: bind pending challenges to the authoritative card epoch,
+  including previously legacy/unbound cards, and implement signing keyring policy.
+- Integrate the V5 atomic consumption callback with the V6 card/identity
+  mutation and enforce authorization epoch fencing across admin mutations. Repeated signatures alone are
   intentionally NOT rejected by the pure verifier.
 - Apply shared HTTP rate limits to challenge issuance, malformed and failed
   requests; avoid secrets and replayable material in logs.
@@ -123,5 +151,5 @@ remain part of the later integration gate.
 - HTTP 503 classification and P5 capacity gates remain open.
 
 Do not deploy or enable v2 until the integration and independent acceptance
-are complete. Existing licensing HTTP behavior remains unchanged; V5 adds persistence and
-operational checks but does not enable the secure protocol.
+are complete. Existing legacy licenses retain their behavior; V6 rejects legacy requests
+for secure-marked cards and does not enable any V2 endpoint.
