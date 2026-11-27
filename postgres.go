@@ -34,7 +34,10 @@ var postgresV6 string
 //go:embed postgres_v7.sql
 var postgresV7 string
 
-var postgresMigrations = []string{postgresV1, postgresV2, postgresV3, postgresV4, postgresV5, postgresV6, postgresV7}
+//go:embed postgres_v8.sql
+var postgresV8 string
+
+var postgresMigrations = []string{postgresV1, postgresV2, postgresV3, postgresV4, postgresV5, postgresV6, postgresV7, postgresV8}
 
 var errCommitUnknown = errors.New("database commit result unknown")
 
@@ -353,9 +356,12 @@ func (p *postgresStore) mutate(ctx context.Context, scope mutationScope, apply f
 			if err = insertOrder(ctx, tx, next.Cards[0]); err != nil {
 				return err
 			}
+			policy, err := readSigningPolicy(ctx, tx)
+			if err != nil { return err }
 			for _, c := range next.Cards {
-				if err = insertCard(ctx, tx, c); err != nil {
-					return err
+				if err = insertCard(ctx, tx, c); err != nil { return err }
+				if policy != nil {
+					if err := dbExec(ctx, tx, "INSERT INTO chezhi_secure_bindings(card_id,public_key,revision) VALUES ($1,'',1)", c.ID); err != nil { return err }
 				}
 			}
 		} else {
