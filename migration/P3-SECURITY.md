@@ -74,16 +74,41 @@ verification until the full policy and P4 storage/time boundary are validated.
 A deterministic challenge transcript hash fixture is included in proof_test.go.
 No live signing keys or device credentials are committed.
 
+## V5 challenge persistence (implemented; integration CI pending)
+
+V5 adds a dedicated `chezhi_challenges` table with bounded canonical payloads,
+nonce primary key and expiry index. The database clock determines validity.
+A deployment-wide advisory transaction lock serializes issuance and the
+4096-row capacity check. Consumption uses DELETE RETURNING on the nonce,
+verifies the authoritative challenge after acquiring the row lock, and calls
+an internal authorization callback on the same transaction. A failed proof
+or callback rolls back the deletion. A committed consumption cannot be
+replayed. A caller must never emit a credential from the callback, and must
+not treat an uncertain commit as a confirmed authorization. The HTTP caller
+will have to consume the shared licensing budget before challenge issuance.
+
+Expiry cleanup is integrated with shared-state maintenance. Mode switches
+and supported logical recovery clear challenges atomically with sessions
+and rate buckets. Runtime grants and deep catalog/data checks include the
+new table. Run db-init offline and reapply runtime grants before starting
+V5 binaries. No historical SQL migration was edited. V5 does not yet bind
+any card to a device public key or expose any proof route.
+
+`TestPostgresProofChallenge` covers competing consumers on two independent
+pools, invalid proof, rollback of a fixture business write, replay, expiry,
+capacity, corrupt payload rejection, deep checks and mode-switch invalidation.
+Actual license mutations, multiple HTTP processes and restore replay tests
+remain part of the later integration gate.
+
 ## Required integration work (not yet implemented)
 
-- V5+ migration: deployment-scoped challenges, explicit secure binding state,
-  monotonic authorization revisions, public-key metadata and keyring policy.
-- Atomic consumption: load server-owned challenge, verify full context and
-  signature, lock and consume the nonce together with card/identity state.
-  Repeated signatures alone are intentionally NOT rejected by the pure
-  verifier; nonce consumption belongs in the database transaction.
-- Bound challenge issuance, expiration and cleanup; rate limit malformed and
-  failed requests, avoid secrets and replayable material in logs.
+- V6+ migration: explicit secure binding state, monotonic authorization
+  revisions, public-key metadata and keyring policy.
+- Integrate the V5 atomic consumption callback with actual card/identity
+  mutation and authorization revision rules. Repeated signatures alone are
+  intentionally NOT rejected by the pure verifier.
+- Apply shared HTTP rate limits to challenge issuance, malformed and failed
+  requests; avoid secrets and replayable material in logs.
 - Strict v2 wire decoding, native HTTPS activation/validation/renewal, deny
   algorithm confusion and all v1/browser/demo downgrade paths for protected
   licenses. Preserve legacy bindings pending explicit authorized migration;
@@ -98,5 +123,5 @@ No live signing keys or device credentials are committed.
 - HTTP 503 classification and P5 capacity gates remain open.
 
 Do not deploy or enable v2 until the integration and independent acceptance
-are complete. Existing production/server behavior is unchanged by this
-standalone package.
+are complete. Existing licensing HTTP behavior remains unchanged; V5 adds persistence and
+operational checks but does not enable the secure protocol.
