@@ -1,0 +1,122 @@
+name: CheZhi License CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go:
+    name: Go regression (${{ matrix.os }}, Go ${{ matrix.go }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            go: '1.23.x'
+          - os: ubuntu-24.04
+            go: '1.26.x'
+          - os: windows-2025
+            go: '1.26.x'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5
+        with:
+          go-version: ${{ matrix.go }}
+          cache: false
+      - run: go version
+      - run: go vet ./...
+      - run: go test -count=1 -v ./...
+      - if: runner.os == 'Linux'
+        run: go test -race -count=1 ./...
+      - if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force bin | Out-Null
+          $env:CGO_ENABLED = '0'
+          go build -trimpath -o bin/chezhi-license-win-x64.exe .
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          (Get-FileHash bin/chezhi-license-win-x64.exe -Algorithm SHA256).Hash
+      - if: runner.os == 'Windows'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: windows-x64-ci-build
+          path: bin/chezhi-license-win-x64.exe
+          if-no-files-found: error
+          retention-days: 7
+
+  integration:
+    name: HTTP and migration
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5
+        with:
+          go-version: '1.26.x'
+          cache: false
+      - name: Build and run live HTTP tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p bin
+          CGO_ENABLED=0 go build -trimpath -o bin/chezhi-license-linux-amd64 .
+          for test in http_smoke.py client_http_smoke.py session_http_smoke.py members_http_smoke.py owner_http_smoke.py; do
+            echo "Running $test"
+            timeout 120s python3 "$test" ./bin/chezhi-license-linux-amd64
+          done
+      - name: Migration and recovery
+        run: |
+          (cd migration && python3 -m unittest -v)
+          timeout 120s python3 migration/runtime_rehearsal.py ./bin/chezhi-license-linux-amd64
+      - name: JavaScript syntax
+        run: node --check admin-ui.js
+
+  repository-hygiene:
+    name: Repository hygiene
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Reject committed runtime files and obvious credentials
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import pathlib, re, subprocess, sys
+          paths = subprocess.check_output(['git', 'ls-files', '-z']).decode().split('\x00')
+          forbidden = {'state.json', 'plans.json', 'members.json', 'owner.json', 'instance.lock'}
+          extensions = {'.exe', '.db', '.sqlite', '.sqlite3', '.zip', '.log', '.jsonl', '.pem', '.key', '.p12', '.pfx'}
+          patterns = [r'-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----', r'gh[pousr]_[A-Za-z0-9]{30,}', r'github_pat_[A-Za-z0-9_]{40,}', r'AKIA[A-Z0-9]{16}']
+          bad = []
+          for name in filter(None, paths):
+              p = pathlib.Path(name)
+              if p.parts[0] in {'data', 'bin'} or p.name in forbidden or p.suffix.lower() in extensions or (p.name.startswith('.env') and p.name != '.env.example'):
+                  bad.append((name, 'runtime or secret file'))
+              if p.as_posix() == '.github/workflows/ci.yml':
+                  continue  # scanner contains its own pattern definitions
+              raw = p.read_bytes()
+              if any(re.search(pattern, raw.decode('utf-8', errors='replace')) for pattern in patterns):
+                  bad.append((name, 'possible credential'))
+          for name, reason in bad:
+              print(f'{reason}: {name}', file=sys.stderr)
+          if bad:
+              sys.exit(1)
+          print('Repository hygiene checks passed; not a comprehensive secret or vulnerability scan.')
+          PY
