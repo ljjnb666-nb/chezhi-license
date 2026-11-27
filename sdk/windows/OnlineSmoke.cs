@@ -25,16 +25,17 @@ internal static class OnlineSmoke
     {
         try
         {
-            if(args.Length!=3) return 2;
+            if(args.Length!=4) return 2;
             string[] cfg=File.ReadAllLines(args[0]);
-            byte[] hash=Hex(args[2]),scope=Hex(cfg[1]),pub=Hex(cfg[2]);
+            byte[] hash=Hex(args[2]),scope=Hex(cfg[1]),pub=Hex(cfg[2]),ca=File.ReadAllBytes(args[3]);
+            Console.WriteLine("STEP verify DLL");
             byte[] card=Encoding.ASCII.GetBytes("ABCDE-FGHJK-MNPQR-STVWX-YZ012");
             byte[] badHash=(byte[])hash.Clone();badHash[0]^=1;
             bool rejected=false;
-            try {new NativeLicenseClient(args[1],badHash,cfg[0],scope,pub);}
+            try {new NativeLicenseClient(args[1],badHash,cfg[0],scope,pub,ca);}
             catch(CryptographicException) {rejected=true;}
             Check(rejected,"bad DLL digest accepted");
-            NativeLicenseClient client=new NativeLicenseClient(args[1],hash,cfg[0],scope,pub);
+            NativeLicenseClient client=new NativeLicenseClient(args[1],hash,cfg[0],scope,pub,ca);
             Guid slot=Guid.NewGuid();
             string name="CheZhiTech.License.v1."+slot.ToString("N");
             try
@@ -42,11 +43,17 @@ internal static class OnlineSmoke
                 using(WindowsDeviceKey key=WindowsDeviceKey.Enroll(slot,DeviceKeyPolicy.Software))
                 {
                     LicenseMetadata meta;
+                    Console.WriteLine("STEP activate with explicit CA");
+                    NativeLicenseClient systemRoots=new NativeLicenseClient(args[1],hash,cfg[0],scope,pub);
+                    Check(systemRoots.Authorize(LicenseOperation.Activate,card,key,out meta)==LicenseStatus.Unavailable && meta==null,"untrusted TLS accepted");
+                    NativeLicenseClient invalidCA=new NativeLicenseClient(args[1],hash,cfg[0],scope,pub,new byte[]{1,2,3});
+                    Check(invalidCA.Authorize(LicenseOperation.Activate,card,key,out meta)==LicenseStatus.InvalidInput && meta==null,"invalid CA accepted");
                     Check(client.Authorize(LicenseOperation.Activate,card,key,out meta)==LicenseStatus.Ok && meta!=null,"native activation");
                     byte[] fingerprint=key.Fingerprint;
                     using(WindowsDeviceKey reopened=WindowsDeviceKey.Open(slot,DeviceKeyPolicy.Software,fingerprint))
                     using(LicenseCoordinator coordinator=new LicenseCoordinator(client,reopened,card))
                     {
+                        Console.WriteLine("STEP validate and renew");
                         Check(Result(coordinator.VerifyAsync(LicenseOperation.Validate)) && coordinator.CanStartProtectedOperation,"native validate");
                         coordinator.NetworkChanged(false);
                         Check(!coordinator.CanStartProtectedOperation && coordinator.VerifyAsync(LicenseOperation.Renew)==null,"offline grant");
@@ -56,8 +63,9 @@ internal static class OnlineSmoke
                         coordinator.Dispose();
                         Check(!coordinator.CanStartProtectedOperation && coordinator.VerifyAsync(LicenseOperation.Validate)==null,"closed coordinator");
                     }
+                    Console.WriteLine("STEP reject invalid signing trust, denial and wrong nonce");
                     byte[] wrong=(byte[])pub.Clone();wrong[0]^=1;
-                    NativeLicenseClient bad=new NativeLicenseClient(args[1],hash,cfg[0],scope,wrong);
+                    NativeLicenseClient bad=new NativeLicenseClient(args[1],hash,cfg[0],scope,wrong,ca);
                     Check(bad.Authorize(LicenseOperation.Validate,card,key,out meta)==LicenseStatus.UntrustedResponse && meta==null,"wrong trust key");
                     byte[] denied=Encoding.ASCII.GetBytes("DENIED-FIXTURE");
                     Check(client.Authorize(LicenseOperation.Validate,denied,key,out meta)==LicenseStatus.Denied && meta==null,"denied response");

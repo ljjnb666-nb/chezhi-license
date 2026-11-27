@@ -200,8 +200,13 @@ and never gate cleanup. No card persistence or automatic enrollment added.
 
 OnlineSmoke uses an actual x64 C# executable, hash-checked Go DLL, persistent
 software CNG key and real loopback TLS exchange against a disposable
-protocol fixture. A fresh test-only CA is imported into CurrentUser Root
-only on hosted CI and removed in finally. Fixture has no database and no
+protocol fixture. A fresh test-only CA is passed as an independently configured DER trust
+anchor to the additive ChezhiLicenseAuthorizeWithCA ABI export. No system
+certificate store is modified. Default Authorize still uses system roots.
+The explicit CA uses an isolated root pool, with normal TLS hostname and
+certificate verification; invalid or absent CA bytes are rejected by the
+explicit entry point. The fixture checks that system roots alone reject
+its certificate. No TLS verification bypass is provided. Fixture has no database and no
 production data, and is built only with sdkfixture. It verifies the device
 proof, signs nonce-bound credentials, and supplies denied and wrong-nonce
 responses. Tests cover activate/validate/renew, wrong signing trust, wrong
@@ -210,3 +215,10 @@ PostgreSQL/TLS tests remain mandatory; successful Windows fixture testing
 does not constitute native-to-production-server or actual campus acceptance.
 Full online chain with actual deployed server and physical TPM remains P4.5.
 Exact new head CI pending.
+
+Run 46008652523: nine jobs succeeded; Windows online step timed out without
+stage output after prior ABI/CNG/DPAPI/state tests passed. Root import was a
+suspected interactive blocker, not confirmed. Remove it entirely, add stage
+logs and a 90-second child deadline plus four-minute step timeout. Additive
+ABI export requires independently authenticated CA configuration, not a CA
+obtained from the server response. Both exports are development-only.

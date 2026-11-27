@@ -16,6 +16,7 @@ namespace Chezhi.Licensing
         private static string loadedPath;
         private static byte[] loadedHash;
         private static AuthorizeFn invoke;
+        private static AuthorizeWithCAFn invokeWithCA;
         private static readonly UTF8Encoding Utf8=new UTF8Encoding(false,true);
 
         [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)]
@@ -32,7 +33,13 @@ namespace Chezhi.Licensing
             [In] byte[] card,uint cardLen,[In] byte[] point,SignFn signer,IntPtr context,
             uint op,[In,Out] byte[] output,uint outputLen);
 
-        private readonly byte[] origin,scope,publicKey;
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        private delegate int AuthorizeWithCAFn(
+            [In] byte[] origin,uint originLen,[In] byte[] deployment,[In] byte[] trusted,
+            [In] byte[] card,uint cardLen,[In] byte[] point,SignFn signer,IntPtr context,
+            uint op,[In,Out] byte[] output,uint outputLen,[In] byte[] ca,uint caLen);
+
+        private readonly byte[] origin,scope,publicKey,root;
 
         private static bool Equal(byte[] a,byte[] b)
         {
@@ -56,7 +63,7 @@ namespace Chezhi.Licensing
             {
                 if(module!=IntPtr.Zero)
                 {
-                    if(invoke==null || !String.Equals(path,loadedPath,StringComparison.OrdinalIgnoreCase) ||
+                    if(invoke==null || invokeWithCA==null || !String.Equals(path,loadedPath,StringComparison.OrdinalIgnoreCase) ||
                         !Equal(digest,loadedHash)) throw new InvalidOperationException("SDK already loaded or unavailable.");
                     return;
                 }
@@ -78,17 +85,20 @@ namespace Chezhi.Licensing
                     if(((VersionFn)Resolve("ChezhiLicenseABIVersion",typeof(VersionFn)))()!=1)
                         throw new InvalidOperationException("Unsupported SDK ABI.");
                     invoke=(AuthorizeFn)Resolve("ChezhiLicenseAuthorize",typeof(AuthorizeFn));
+                    invokeWithCA=(AuthorizeWithCAFn)Resolve("ChezhiLicenseAuthorizeWithCA",typeof(AuthorizeWithCAFn));
                 }
             }
         }
 
-        internal NativeLicenseClient(string dll,byte[] digest,string httpsOrigin,byte[] deployment,byte[] trusted)
+        internal NativeLicenseClient(string dll,byte[] digest,string httpsOrigin,byte[] deployment,byte[] trusted,byte[] explicitCA=null)
         {
             if(String.IsNullOrEmpty(httpsOrigin) || deployment==null || deployment.Length!=32 ||
                 trusted==null || trusted.Length!=32) throw new ArgumentException("Invalid SDK trust configuration.");
             origin=Utf8.GetBytes(httpsOrigin);
             if(origin.Length>2048) throw new ArgumentException("Origin too long.");
             scope=(byte[])deployment.Clone();publicKey=(byte[])trusted.Clone();
+            if(explicitCA!=null && (explicitCA.Length==0||explicitCA.Length>16384)) throw new ArgumentException("Invalid CA anchor.");
+            root=explicitCA==null?null:(byte[])explicitCA.Clone();
             Load(dll,digest);
         }
 
@@ -100,8 +110,10 @@ namespace Chezhi.Licensing
             SignFn signer=device.SignCallback;
             try
             {
-                int status=invoke(origin,(uint)origin.Length,scope,publicKey,card,(uint)card.Length,
-                    device.PublicPoint,signer,IntPtr.Zero,(uint)operation,output,32);
+                int status=root==null?invoke(origin,(uint)origin.Length,scope,publicKey,card,(uint)card.Length,
+                    device.PublicPoint,signer,IntPtr.Zero,(uint)operation,output,32):
+                    invokeWithCA(origin,(uint)origin.Length,scope,publicKey,card,(uint)card.Length,
+                    device.PublicPoint,signer,IntPtr.Zero,(uint)operation,output,32,root,(uint)root.Length);
                 if(status!=0)
                 {
                     foreach(byte b in output) if(b!=0) return LicenseStatus.UntrustedResponse;

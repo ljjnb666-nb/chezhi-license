@@ -17,6 +17,7 @@ import "C"
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/x509"
 	"errors"
 	"unsafe"
 
@@ -31,7 +32,30 @@ func ChezhiLicenseABIVersion() C.uint32_t { return 1 }
 func ChezhiLicenseAuthorize(origin *C.uint8_t, originLen C.uint32_t,
 	deployment *C.uint8_t, trusted *C.uint8_t, card *C.uint8_t, cardLen C.uint32_t,
 	device *C.uint8_t, signer C.chezhi_sign_fn, userContext unsafe.Pointer,
-	operation C.uint32_t, output *C.uint8_t, outputLen C.uint32_t) (status C.int32_t) {
+	operation C.uint32_t, output *C.uint8_t, outputLen C.uint32_t) C.int32_t {
+	return authorize(origin,originLen,deployment,trusted,card,cardLen,device,signer,userContext,operation,output,outputLen,nil,0)
+}
+
+//export ChezhiLicenseAuthorizeWithCA
+func ChezhiLicenseAuthorizeWithCA(origin *C.uint8_t, originLen C.uint32_t,
+	deployment *C.uint8_t, trusted *C.uint8_t, card *C.uint8_t, cardLen C.uint32_t,
+	device *C.uint8_t, signer C.chezhi_sign_fn, userContext unsafe.Pointer,
+	operation C.uint32_t, output *C.uint8_t, outputLen C.uint32_t,
+	ca *C.uint8_t, caLen C.uint32_t) C.int32_t {
+	// Explicit independent DER trust anchor, no global certificate-store
+	// changes and no insecure transport option.
+	if ca==nil || caLen==0 || caLen>16384 {
+		if output!=nil && outputLen==sdk.ResultSize {clear(unsafe.Slice((*byte)(unsafe.Pointer(output)),sdk.ResultSize))}
+		return C.int32_t(sdk.InvalidInput)
+	}
+	return authorize(origin,originLen,deployment,trusted,card,cardLen,device,signer,userContext,operation,output,outputLen,ca,caLen)
+}
+
+func authorize(origin *C.uint8_t, originLen C.uint32_t,
+	deployment *C.uint8_t, trusted *C.uint8_t, card *C.uint8_t, cardLen C.uint32_t,
+	device *C.uint8_t, signer C.chezhi_sign_fn, userContext unsafe.Pointer,
+	operation C.uint32_t, output *C.uint8_t, outputLen C.uint32_t,
+	ca *C.uint8_t, caLen C.uint32_t) (status C.int32_t) {
 	// Buffers are owned by the caller. Fixed-length pointers must be valid;
 	// pointers and output must not overlap. ABI cannot validate arbitrary
 	// foreign address ranges. Nothing is retained after return.
@@ -44,6 +68,15 @@ func ChezhiLicenseAuthorize(origin *C.uint8_t, originLen C.uint32_t,
 	if origin==nil || originLen==0 || originLen>2048 || deployment==nil || trusted==nil ||
 		card==nil || cardLen==0 || cardLen>100 || device==nil || signer==nil ||
 		operation<1 || operation>3 { return C.int32_t(sdk.InvalidInput) }
+	var roots *x509.CertPool
+	if caLen!=0 {
+		cert,err:=x509.ParseCertificate(C.GoBytes(unsafe.Pointer(ca),C.int(caLen)))
+		if err!=nil || !cert.IsCA || !cert.BasicConstraintsValid || cert.KeyUsage&x509.KeyUsageCertSign==0 {
+			return C.int32_t(sdk.InvalidInput)
+		}
+		roots=x509.NewCertPool()
+		roots.AddCert(cert)
+	}
 	var scope proof.Digest
 	copy(scope[:],C.GoBytes(unsafe.Pointer(deployment),32))
 	pub:=ed25519.PublicKey(C.GoBytes(unsafe.Pointer(trusted),32))
@@ -62,7 +95,7 @@ func ChezhiLicenseAuthorize(origin *C.uint8_t, originLen C.uint32_t,
 	})
 	if err!=nil {return C.int32_t(sdk.InvalidInput)}
 	r,s:=sdk.Authorize(context.Background(),sdk.Config{
-		Origin:string(C.GoBytes(unsafe.Pointer(origin),C.int(originLen))),Deployment:scope,TrustedKey:pub,
+		Origin:string(C.GoBytes(unsafe.Pointer(origin),C.int(originLen))),Deployment:scope,TrustedKey:pub,Roots:roots,
 	},proof.Operation(operation),string(C.GoBytes(unsafe.Pointer(card),C.int(cardLen))),provider)
 	if s==sdk.OK {r.Encode(out)}
 	return C.int32_t(s)
