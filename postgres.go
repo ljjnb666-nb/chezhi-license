@@ -31,7 +31,10 @@ var postgresV5 string
 //go:embed postgres_v6.sql
 var postgresV6 string
 
-var postgresMigrations = []string{postgresV1, postgresV2, postgresV3, postgresV4, postgresV5, postgresV6}
+//go:embed postgres_v7.sql
+var postgresV7 string
+
+var postgresMigrations = []string{postgresV1, postgresV2, postgresV3, postgresV4, postgresV5, postgresV6, postgresV7}
 
 var errCommitUnknown = errors.New("database commit result unknown")
 
@@ -365,7 +368,7 @@ func (p *postgresStore) mutate(ctx context.Context, scope mutationScope, apply f
 						if err := resetSecureBinding(ctx, tx, c.ID); err != nil { return err }
 					}
 				}
-				if err = dbExec(ctx, tx, `UPDATE chezhi_cards SET activated=$2,expires=$3,device=$4,revoked=$5 WHERE id=$1`,
+				if err = dbExec(ctx, tx, `UPDATE chezhi_cards SET activated=$2,expires=$3,device=$4,revoked=$5,auth_epoch=auth_epoch+1 WHERE id=$1`,
 					c.ID, sqlOptionalTime(c.Activated), sqlOptionalTime(c.Expires), c.Device, c.Revoked); err != nil {
 					return err
 				}
