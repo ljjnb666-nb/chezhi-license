@@ -282,6 +282,53 @@ def test_cluster(a, b, da, sql, password, restart):
     return ca, key, device
 
 
+def measure_dashboard_http(a,b,cookie,sql):
+    paths = dict(overview="/?view=overview", cards="/?view=cards&page=5", orders="/?view=orders&op=5",
+                 devices="/?view=devices&op=5", audit="/?view=audit&ap=5")
+    previous = 0
+    for amount in (10_000,100_000):
+        sql(f"""BEGIN;
+            INSERT INTO chezhi_orders(ref,channel,cents,days,created)
+            SELECT 'http-scale-'||i,CASE WHEN i%3=0 THEN 'test' ELSE 'wechat' END,110,30,
+                   62135596800+floor(extract(epoch FROM transaction_timestamp()))
+            FROM generate_series({previous//10+1},{amount//10}) i;
+            INSERT INTO chezhi_cards(id,hash,prefix,ref,created,days,activated,expires,device,revoked)
+            SELECT left(f.hash,24),f.hash,'ABCDE',o.ref,o.created,30,
+                CASE WHEN i%3=0 THEN o.created END,CASE WHEN i%3=0 THEN o.created+2592000 END,
+                CASE WHEN i%3=0 THEN repeat('a',64) ELSE '' END,i%11=0
+            FROM generate_series({previous+1},{amount}) i
+            CROSS JOIN LATERAL (SELECT md5('http:'||i)||md5('http-extra:'||i) AS hash) f
+            JOIN chezhi_orders o ON o.ref='http-scale-'||((i-1)/10+1);
+            INSERT INTO chezhi_audit(occurred,action,card_id,actor,target)
+            SELECT c.created,'issue',c.id,'admin','' FROM chezhi_cards c
+            JOIN chezhi_orders o USING(ref)
+            WHERE o.ref IN (SELECT 'http-scale-'||i FROM generate_series({previous//10+1},{amount//10}) i);
+            COMMIT; ANALYZE;""")
+        assert int(sql("SELECT count(*) FROM chezhi_cards")) == amount+1
+        previous=amount
+
+        def reader(i):
+            client = a if i<8 else b
+            elapsed={}
+            # Stagger page types across workers while keeping 8 workers per instance.
+            items=list(paths.items())
+            for name,path in items[i%5:]+items[:i%5]:
+                start = time.perf_counter()
+                status,_,body=client.page(path,cookie)
+                elapsed[name]=(time.perf_counter()-start)*1000
+                assert status==200 and "业务数据暂不可用" not in body, (name,status)
+            return elapsed
+
+        with ThreadPoolExecutor(16) as pool:
+            samples=list(pool.map(reader,range(16)))
+        for name in paths:
+            times=sorted(x[name] for x in samples)
+            p95=times[(95*len(times)+99)//100-1]
+            print(f"HTTP dashboard synthetic_cards={amount} readers=16 section={name} "
+                  f"samples={len(times)} p95_ms={p95:.1f} slow_over_500ms={sum(x>500 for x in times)}",flush=True)
+    print("PASS HTTPS dashboard under both synthetic data sizes and 16 concurrent readers",flush=True)
+
+
 def main():
     binary = str(Path(sys.argv[1]).resolve())
     root = Path(__file__).resolve().parent.parent
@@ -376,6 +423,7 @@ def main():
                 assert b.page("/", cookie)[0] == 200
                 sql("DELETE FROM chezhi_rate_limits")
                 assert b.license("validate", valid_key, device)["data"]["valid"]
+                measure_dashboard_http(a,b,cookie,sql)
             print("PASS database outage, fail-closed shared state, readiness recovery and graceful process shutdown", flush=True)
 
             proxy_port, backend, diagnostic_port = [port() for _ in range(3)]

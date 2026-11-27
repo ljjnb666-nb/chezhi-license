@@ -12,7 +12,7 @@ identifier. They do not grant administrator permissions.
 ## Request and result
 
 Send `Content-Type: application/json` and one UTF-8 JSON object, at most
-4 KiB. The supported fields are `key` (1?100 bytes) and `device` (1?200
+4 KiB. The supported fields are `key` (1 to 100 bytes) and `device` (1 to 200
 bytes, nonempty after trimming). Duplicate and unknown fields are rejected.
 The service generates a fresh `X-Request-ID`. Native requests carry no
 browser Origin, Referer, or Fetch Metadata headers. Never send keys in URLs.

@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"reflect"
 	"runtime"
@@ -227,5 +229,95 @@ func TestPostgresServerDashboardScale(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestPostgresServerSharedStateReclamation(t *testing.T) {
+	store, _ := postgresFixture(t)
+	pgInitialize(t, store)
+	ctx := context.Background()
+	if err := store.pg.initializeOwner(ctx, "synthetic owner 24681"); err != nil {
+		t.Fatal(err)
+	}
+	ctx = context.WithValue(ctx, accountRevisionKey{}, int64(1))
+	issued := make([]string, 32)
+	for i := range issued {
+		issued[i] = randomToken()
+		if err := store.pg.createSharedSession(ctx, "", issued[i], "admin", "owner", 1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.pg.createSharedSession(ctx, "", randomToken(), "admin", "owner", 1); err != errSessionCapacity {
+		t.Fatal("shared capacity was exceeded", err)
+	}
+	pgExec(t, store, "UPDATE chezhi_sessions SET expires=clock_timestamp()-interval '1 second' WHERE token_digest=$1", digestSecret(issued[0]))
+	pgExec(t, store, `INSERT INTO chezhi_rate_limits(scope,source,window_start,used)
+        VALUES ('login','*',floor(extract(epoch FROM clock_timestamp())/60)::bigint-2,7)`)
+	if allowed, err := store.pg.allowShared(ctx, "login", digestSecret("active-source"), 60, 5); err != nil || !allowed {
+		t.Fatal("current limit unavailable", err)
+	}
+	if err := store.pg.cleanShared(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var sessions, rates int
+	if err := store.pg.db.QueryRow("SELECT (SELECT count(*) FROM chezhi_sessions),(SELECT count(*) FROM chezhi_rate_limits)").Scan(&sessions, &rates); err != nil || sessions != 31 || rates != 2 {
+		t.Fatal("cleanup removed currently valid state or retained expired state", err)
+	}
+	if err := store.pg.createSharedSession(ctx, "", randomToken(), "admin", "owner", 1); err != nil {
+		t.Fatal("expired capacity not recovered", err)
+	}
+	if _, err := store.pg.sharedSession(ctx, issued[0]); err != errSessionInvalid {
+		t.Fatal("expired session accepted", err)
+	}
+}
+
+func TestServerConnectionLimit(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bound := limitConnections(listener, 1)
+	defer bound.Close()
+	for i := 0; i < 2; i++ {
+		c, err := net.Dial("tcp", listener.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer c.Close()
+	}
+	first, err := bound.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		second, _ := bound.Accept()
+		accepted <- second
+	}()
+	select {
+	case <-accepted:
+		t.Fatal("accepted over capacity")
+	case <-time.After(30 * time.Millisecond):
+	}
+	first.Close()
+	select {
+	case second := <-accepted:
+		if second == nil {
+			t.Fatal("queued connection not accepted")
+		}
+		defer second.Close()
+	case <-time.After(time.Second):
+		t.Fatal("capacity not released")
+	}
+	closed := make(chan error, 1)
+	go func() { _, err := bound.Accept(); closed <- err }()
+	bound.Close()
+	select {
+	case err := <-closed:
+		if !errors.Is(err, net.ErrClosed) {
+			t.Fatal("listener shutdown was not propagated", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("listener failed to stop while at capacity")
 	}
 }

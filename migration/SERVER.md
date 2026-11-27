@@ -38,9 +38,9 @@ minimum resources needed to accept traffic.
 | `CHEZHI_TLS_CERT`, `CHEZHI_TLS_KEY` | Certificate and private key files. The cert must cover the public hostname and be within its validity period. Direct TLS requires TLS 1.2 or newer. |
 | `CHEZHI_TRUSTED_PROXIES` | Comma-separated CIDRs for immediate peer addresses in proxy mode. Prefer exact host CIDRs. |
 | `CHEZHI_DIAGNOSTICS` | Optional separate loopback IP and port for readiness, liveness and metrics. |
-| `CHEZHI_LOGIN_PER_MINUTE` | Default 5 attempts per source, configurable 1?30, with a deployment limit of 60 per minute. |
+| `CHEZHI_LOGIN_PER_MINUTE` | Default 5 attempts per source, configurable 1 to 30, with a deployment limit of 60 per minute. |
 | `CHEZHI_LICENSE_PER_MINUTE`, `CHEZHI_LICENSE_GLOBAL_PER_MINUTE` | License defaults are 60/source and 240/deployment per minute. Allowed maxima are 600 and 3000. |
-| `CHEZHI_MAX_CONNECTIONS` | Maximum accepted application TCP connections per instance, default 128, range 16?1024. |
+| `CHEZHI_MAX_CONNECTIONS` | Maximum accepted application TCP connections per instance, default 128, range 16 to 1024. |
 
 Keep configuration files outside Git and Docker build contexts and give
 the service account only the file access it needs. Reconfigure instances

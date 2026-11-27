@@ -16,7 +16,7 @@ services:
       retries: 30
   migrate:
     profiles: [setup]
-    image: chezhi-license-server:local
+    image: ${CHEZHI_SERVER_IMAGE:-chezhi-license-server:local}
     build: .
     environment:
       CHEZHI_DATABASE_URL_FILE: /run/secrets/migration_url
@@ -29,7 +29,7 @@ services:
       postgres:
         condition: service_healthy
   server:
-    image: chezhi-license-server:local
+    image: ${CHEZHI_SERVER_IMAGE:-chezhi-license-server:local}
     build: .
     depends_on:
       postgres:
