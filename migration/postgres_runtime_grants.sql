@@ -13,3 +13,4 @@ GRANT SELECT, INSERT, DELETE ON chezhi_sessions TO chezhi_runtime;
 GRANT SELECT, INSERT, DELETE ON chezhi_rate_limits TO chezhi_runtime;
 GRANT UPDATE (used) ON chezhi_rate_limits TO chezhi_runtime;
 GRANT SELECT ON chezhi_deployment TO chezhi_runtime;
+GRANT SELECT, INSERT, DELETE ON chezhi_challenges TO chezhi_runtime;
