@@ -6,6 +6,10 @@ from http.client import HTTPConnection, HTTPSConnection
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import html
+from collections import Counter
+from statistics import median
+from dashboard_plans import capture_plans
+from caddy_acceptance import run_caddy_suite
 import json
 import os
 from pathlib import Path
@@ -17,7 +21,7 @@ import ssl
 import subprocess
 import sys
 import tempfile
-from threading import Thread
+from threading import Event, Thread
 import time
 from urllib.parse import urlencode, urlsplit, urlunsplit
 
@@ -119,7 +123,7 @@ class Client:
 
 
 @contextmanager
-def instance(binary, env, diagnostic):
+def instance(binary, env, diagnostic, ready_path="/readyz", structured=True):
     with tempfile.TemporaryFile(mode="w+b") as logs:
         flags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
         p = subprocess.Popen([binary], env=env, stdout=logs, stderr=logs, creationflags=flags)
@@ -128,7 +132,7 @@ def instance(binary, env, diagnostic):
                 if p.poll() is not None:
                     logs.seek(0)
                     raise RuntimeError(f"instance exited: {logs.read().decode(errors='replace')}")
-                return diagnostic.request("/readyz")[0] == 200
+                return diagnostic.request(ready_path)[0] == 200
             eventually(ready)
             yield
         finally:
@@ -142,7 +146,8 @@ def instance(binary, env, diagnostic):
                     raise
                 assert p.returncode == 0
                 logs.seek(0)
-                assert b'"msg":"server_stopped"' in logs.read()
+                if structured:
+                    assert b'"msg":"server_stopped"' in logs.read()
 
 
 @contextmanager
@@ -279,13 +284,139 @@ def test_cluster(a, b, da, sql, password, restart):
 
     assert da.request("/metrics")[0] == 200 and "chezhi_db_connections_open" in da.request("/metrics")[2]
     assert a.page("/", ca)[0] == 200
-    return ca, key, device
+    return ca, key, device, password
 
 
-def measure_dashboard_http(a,b,cookie,sql):
+def check_sensitive_limit(a,b,sql,password,restart):
+    sql("DELETE FROM chezhi_rate_limits WHERE scope IN ('account','login')")
+    first, second = a.login("admin",password), b.login("admin",password)
+    replacements="next-"+secrets.token_hex(16)
+    old="wrong-"+secrets.token_hex(16)
+    csrf_a=a.csrf("/?view=account",first)
+    csrf_b=b.csrf("/?view=account",second)
+    # Keep this burst in one database-defined minute; the boundary resets counters.
+    if int(sql("SELECT extract(second FROM clock_timestamp())::int"))>=50:
+        eventually(lambda: int(sql("SELECT extract(second FROM clock_timestamp())::int"))<10,timeout=13)
+    before=int(sql("SELECT count(*) FROM chezhi_audit WHERE action='password_failed'"))
+
+    def change(client,cookie,csrf,current):
+        return client.form("/account/password",dict(csrf=csrf,current_password=current,
+            new_password=replacements,confirm_password=replacements),cookie)[0]
+
+    for i in range(2):
+        assert change(a,first,csrf_a,old)==200
+    assert change(b,second,csrf_b,old)==200
+    restart()
+    source_variant=Client(b.port,b.host,b.tls,source="127.0.0.2")
+    participants=[(a,first,csrf_a),(b,second,csrf_b),(source_variant,second,csrf_b),
+                  (a,first,csrf_a),(b,second,csrf_b),(source_variant,second,csrf_b)]
+    with ThreadPoolExecutor(6) as pool:
+        results=list(pool.map(lambda args:change(*args,old),participants))
+    assert Counter(results)=={200:2,429:4},results
+    assert change(b,second,csrf_b,password)==429
+    assert int(sql("SELECT count(*) FROM chezhi_audit WHERE action='password_failed'"))==before+5
+    assert sql("SELECT max(used) FROM chezhi_rate_limits WHERE scope='account' AND source<>'*'")=="5"
+
+    # Simulate window age with the database clock as the authority. The
+    # old bucket is retained and the new window must be independently usable.
+    sql("UPDATE chezhi_rate_limits SET window_start=window_start-120 WHERE scope='account'")
+    sql("ALTER TABLE chezhi_rate_limits RENAME TO chezhi_test_rate_unavailable")
+    try:
+        assert change(a,first,csrf_a,password)==503
+    finally:
+        sql("ALTER TABLE chezhi_test_rate_unavailable RENAME TO chezhi_rate_limits")
+    assert a.page("/",first)[0]==200
+    assert change(b,second,csrf_b,password)==303
+    assert a.page("/",first)[0]==303 and b.page("/",second)[0]==303
+    assert sql("SELECT count(*) FROM chezhi_audit WHERE action='password_changed' AND actor='admin'")!="0"
+    print("PASS account-wide password budget across sessions, sources, nodes and restart; concurrent limit, aged window, unavailable storage and audit",flush=True)
+    sql("DELETE FROM chezhi_rate_limits WHERE scope='login'")
+    return b.login("admin",replacements),replacements
+
+
+def verify_secure_restore(binary,a,b,pg,sql,cli,migration_env,runtime_env,grants,env_a,password,key,device):
+    sql("DELETE FROM chezhi_rate_limits WHERE scope='login'")
+    owner=a.login("admin",password)
+    fields=dict(csrf=a.csrf("/?view=members",owner),name="restore231",role="viewer",action="member-create")
+    status,_,body=a.form("/members",fields,owner)
+    assert status==200
+    secret=re.search(r'rows="2">([0-9a-f]{64})</textarea>',body)[1]
+    member=b.login("restore231",secret)
+    assert b.page("/?view=overview",owner)[0]==200 and a.page("/?view=cards",member)[0]==200
+    assert sql("SELECT count(*) FROM chezhi_sessions")!="0"
+    restored="chezhi_recovered_"+secrets.token_hex(6)
+    dump="/tmp/"+restored+".dump"
+    live=urlsplit(migration_env["CHEZHI_DATABASE_URL"]).path.lstrip("/")
+    def target(env):
+        address=urlsplit(env["CHEZHI_DATABASE_URL"])
+        return dict(env,CHEZHI_DATABASE_URL=urlunsplit(address._replace(path="/"+restored)))
+    pg("createdb",restored)
+    try:
+        pg("pg_dump","-d",live,"-Fc","--no-owner","--no-acl","-f",dump)
+        assert b.form("/logout",{"logout_csrf":a.csrf("/?view=account",owner,"logout_csrf")},owner)[0]==303
+        editor=a.login("admin",password)
+        assert a.form("/members",{**fields,"csrf":a.csrf("/?view=members",editor),"action":"member-role","role":"operator"},editor)[0]==200
+        assert b.page("/",owner)[0]==303 and b.page("/",member)[0]==303
+
+        pg("pg_restore","-d",restored,"--exit-on-error","--single-transaction","--no-owner","--no-acl",dump)
+        sql(None,db=restored,stdin=grants)
+        assert int(sql("SELECT count(*) FROM chezhi_sessions",db=restored))>=2
+        assert int(sql("SELECT count(*) FROM chezhi_rate_limits",db=restored))>0
+        client_port,diagnostic_port=port(),port()
+        restored_env=dict(target(env_a),CHEZHI_LISTEN=f"127.0.0.1:{client_port}",
+                          CHEZHI_DIAGNOSTICS=f"127.0.0.1:{diagnostic_port}")
+        assert "requires recovery" in cli(restored_env,success=False).stderr
+        cli(target(runtime_env),"db-recover-security",restored,success=False)
+        cli(target(migration_env),"db-recover-security",live,success=False)
+        cli(target(migration_env),"db-check","--migrator")
+        def business():
+            return {table:sql(f"SELECT to_jsonb(t)::text FROM chezhi_{table} t ORDER BY to_jsonb(t)::text",db=restored)
+                    for table in ("orders","cards","members","owner","plans","config")}
+        business_before=business()
+        prior_audit=sql("SELECT to_jsonb(a)::text FROM chezhi_audit a ORDER BY position",db=restored)
+        reset=cli(target(migration_env),"db-recover-security",restored)
+        assert "sessions=" in reset.stdout and "rate_buckets=" in reset.stdout
+        assert business()==business_before
+        assert sql("SELECT to_jsonb(a)::text FROM chezhi_audit a WHERE action<>'security_recovered' ORDER BY position",db=restored)==prior_audit
+        assert sql("SELECT count(*) FROM chezhi_audit WHERE action='security_recovered'",db=restored)=="1"
+        assert sql("SELECT (SELECT count(*) FROM chezhi_sessions),(SELECT count(*) FROM chezhi_rate_limits)",db=restored)=="0|0"
+        cli(target(migration_env),"db-recover-security",restored,success=False)
+        cli(target(runtime_env),"db-check","--runtime")
+        restored_client=Client(client_port,a.host,a.tls)
+        diag=Client(diagnostic_port,f"127.0.0.1:{diagnostic_port}")
+        with instance(binary,restored_env,diag):
+            assert restored_client.page("/",owner)[0]==303 and restored_client.page("/",member)[0]==303
+            new_owner=restored_client.login("admin",password)
+            new_member=restored_client.login("restore231",secret)
+            assert restored_client.page("/?view=cards",new_member)[0]==200
+            assert restored_client.license("validate",key,device)["data"]["valid"]
+            new_key=restored_client.issue(new_owner,"restored-new")
+            assert restored_client.license("activate",new_key,"restored-new-device")["data"]["valid"]
+        print("PASS native restore with live snapshot sessions, later logout and role change, offline audited reset, invalid old cookies and new login",flush=True)
+        return editor
+    finally:
+        pg("dropdb","--force",restored)
+        run(["docker","exec",os.environ["CHEZHI_TEST_POSTGRES_CONTAINER"],"rm","-f",dump])
+
+
+def measure_dashboard_http(a,b,cookie,sql,diagnostics):
     paths = dict(overview="/?view=overview", cards="/?view=cards&page=5", orders="/?view=orders&op=5",
                  devices="/?view=devices&op=5", audit="/?view=audit&ap=5")
     previous = 0
+    benchmark=os.getenv("CHEZHI_PERF_PROFILE")=="benchmark"
+    audited=os.getenv("CHEZHI_AUDITED_BASELINE")=="1"
+    trials=3 if benchmark else 1
+    iterations=4 if benchmark else 1
+    warmups=2 if benchmark else 0
+    slo_pass=True
+    def stats(client):
+        code,_,body=client.request("/metrics")
+        assert code==200
+        return {key:int(value) for key,value in re.findall(r"^(chezhi_db_[a-z_]+) (\d+)$",body,re.M)}
+    def perc(values,percent):
+        values=sorted(values)
+        return values[(percent*len(values)+99)//100-1]
+
     for amount in (10_000,100_000):
         sql(f"""BEGIN;
             INSERT INTO chezhi_orders(ref,channel,cents,days,created)
@@ -304,33 +435,126 @@ def measure_dashboard_http(a,b,cookie,sql):
             JOIN chezhi_orders o USING(ref)
             WHERE o.ref IN (SELECT 'http-scale-'||i FROM generate_series({previous//10+1},{amount//10}) i);
             COMMIT; ANALYZE;""")
-        assert int(sql("SELECT count(*) FROM chezhi_cards")) == amount+1
+        assert int(sql("SELECT count(*) FROM chezhi_cards WHERE ref LIKE 'http-scale-%'")) == amount
         previous=amount
+        baseline_metrics=[stats(diag) for diag in diagnostics]
 
-        def reader(i):
+        def reader(i, repeats):
             client = a if i<8 else b
-            elapsed={}
-            # Stagger page types across workers while keeping 8 workers per instance.
+            events=[]
             items=list(paths.items())
-            for name,path in items[i%5:]+items[:i%5]:
-                start = time.perf_counter()
-                status,_,body=client.page(path,cookie)
-                elapsed[name]=(time.perf_counter()-start)*1000
-                assert status==200 and "业务数据暂不可用" not in body, (name,status)
-            return elapsed
+            for _ in range(repeats):
+                for name,path in items[i%5:]+items[:i%5]:
+                    start=time.perf_counter()
+                    code,_,body=client.page(path,cookie)
+                    elapsed=(time.perf_counter()-start)*1000
+                    if code==200 and "业务数据暂不可用" in body:
+                        code=503
+                    events.append((name,code,elapsed))
+            return events
 
-        with ThreadPoolExecutor(16) as pool:
-            samples=list(pool.map(reader,range(16)))
-        for name in paths:
-            times=sorted(x[name] for x in samples)
-            p95=times[(95*len(times)+99)//100-1]
-            print(f"HTTP dashboard synthetic_cards={amount} readers=16 section={name} "
-                  f"samples={len(times)} p95_ms={p95:.1f} slow_over_500ms={sum(x>500 for x in times)}",flush=True)
-    print("PASS HTTPS dashboard under both synthetic data sizes and 16 concurrent readers",flush=True)
+        def load(rounds):
+            with ThreadPoolExecutor(16) as pool:
+                return [event for record in pool.map(lambda i:reader(i,rounds),range(16)) for event in record]
+
+        if benchmark:
+            cold=os.getenv("CHEZHI_PERF_COLD_DB")=="1"
+            if cold:
+                # This option is for the dedicated benchmark service only.
+                run(["docker","restart",os.environ["CHEZHI_TEST_POSTGRES_CONTAINER"]],
+                    stdout=subprocess.DEVNULL)
+                eventually(lambda:all(diag.request("/readyz")[0]==200 for diag in diagnostics),timeout=25)
+            first=load(1)
+            print(f"FIRST_ACCESS cards={amount} cold_pg_buffers={cold} p95_ms={perc([x[2] for x in first],95):.1f} "
+                  f"statuses={dict(Counter(x[1] for x in first))}",flush=True)
+            assert all(event[1]==200 for event in first)
+            warmed=load(warmups)
+            assert all(event[1]==200 for event in warmed)
+
+        trial_p95={name:[] for name in paths}
+        combined={name:[] for name in paths}
+        for trial in range(trials):
+            events=load(iterations)
+            for name in paths:
+                selected=[x for x in events if x[0]==name]
+                statuses=Counter(x[1] for x in selected)
+                samples=[x[2] for x in selected if x[1]==200]
+                assert len(samples)==len(selected), (name,dict(statuses))
+                trial_p95[name].append(perc(samples,95))
+                combined[name].extend(samples)
+                print(f"HTTP dashboard cards={amount} readers=16 trial={trial+1} section={name} "
+                      f"samples={len(samples)} p50_ms={perc(samples,50):.1f} p95_ms={perc(samples,95):.1f} "
+                      f"p99_ms={perc(samples,99):.1f} max_ms={max(samples):.1f} error_rate=0 "
+                      f"http_503={statuses[503]} http_429={statuses[429]}",flush=True)
+        for name,samples in combined.items():
+            p95=median(trial_p95[name])
+            slo_pass &= p95<=500
+            print(f"SLO cards={amount} section={name} samples={len(samples)} median_trial_p95_ms={p95:.1f} "
+                  f"slow_over_500ms={sum(x>500 for x in samples)} passed={p95<=500}",flush=True)
+
+        if benchmark:
+            csrf=a.csrf("/?view=issue",cookie)
+            started,sampled,finished=Event(),Event(),Event()
+            lock_samples=[]
+            def observe():
+                while not finished.wait(0.10):
+                    lock_samples.append(int(sql("""SELECT count(*) FROM pg_stat_activity
+                        WHERE datname=current_database() AND wait_event_type='Lock' AND pid<>pg_backend_pid()""")))
+            def writer():
+                started.wait(timeout=15)
+                assert started.is_set()
+                form=dict(csrf=csrf,action="issue",preset="30",quantity=1,
+                          amount_yuan="5.00",confirmed="yes",channel="test",sale_ref=f"perf-mixed-{amount}")
+                outcomes=Counter()
+                for _ in range(40):
+                    status,_,body=a.form("/?view=issue",form,cookie)
+                    outcomes[status]+=1
+                    key=re.search(r'<textarea readonly aria-label="生成卡密">(.*?)</textarea>',body,re.S)
+                    if status==200 and key:
+                        sampled.set()
+                        reply=b.license("activate",html.unescape(key[1]).strip(),"perf-device")
+                        assert reply["data"]["valid"]
+                        return outcomes
+                    assert status in (429,503),status
+                    time.sleep(0.025)
+                raise AssertionError("mixed benchmark could not issue a card")
+
+            with ThreadPoolExecutor(18) as pool:
+                observed=pool.submit(observe)
+                work=pool.submit(writer)
+                readers=[pool.submit(reader,i,iterations) for i in range(16)]
+                started.set()
+                try:
+                    mixed=[x for f in readers for x in f.result()]
+                    writes=work.result()
+                finally:
+                    finished.set()
+                observed.result()
+            assert sampled.is_set()
+            status=Counter(event[1] for event in mixed)
+            print(f"MIXED cards={amount} reads={len(mixed)} responses={dict(status)} "
+                  f"error_rate={(len(mixed)-status[200])/len(mixed):.4f} http_503={status[503]} http_429={status[429]} "
+                  f"issue_responses={dict(writes)} activations=1 lock_samples={len(lock_samples)} "
+                  f"lock_waiters_peak={max(lock_samples,default=0)}",flush=True)
+            for name in paths:
+                ok=[event[2] for event in mixed if event[0]==name and event[1]==200]
+                print(f"MIXED_LATENCY cards={amount} section={name} samples={len(ok)} "
+                      f"p50_ms={perc(ok,50):.1f} p95_ms={perc(ok,95):.1f} p99_ms={perc(ok,99):.1f} max_ms={max(ok):.1f}",flush=True)
+
+        end_metrics=[stats(diag) for diag in diagnostics]
+        print(f"POOL cards={amount} instances={len(diagnostics)} before={baseline_metrics} after={end_metrics}",flush=True)
+        plan_dir=os.getenv("CHEZHI_PLAN_DIR")
+        if plan_dir and amount==100_000:
+            capture_plans(sql,plan_dir,"audited" if audited else "optimized",audited)
+    print(f"PERFORMANCE_500MS_TARGET {'PASS' if slo_pass else 'MISS'} trials={trials} samples_per_page_per_trial={16*iterations}",flush=True)
+    if os.getenv("CHEZHI_REQUIRE_PERF")=="1":
+        assert benchmark and slo_pass,"repeated HTTPS P95 did not meet the 500 ms target"
+    print("PASS HTTPS dashboard functional checks under both synthetic data sizes",flush=True)
 
 
 def main():
     binary = str(Path(sys.argv[1]).resolve())
+    baseline=os.getenv("CHEZHI_AUDITED_BASELINE")=="1"
     root = Path(__file__).resolve().parent.parent
     container = os.environ["CHEZHI_TEST_POSTGRES_CONTAINER"]
     base = urlsplit(os.environ["CHEZHI_TEST_DATABASE_URL"])
@@ -377,14 +601,20 @@ def main():
             migration_env = dict(os.environ, CHEZHI_DATABASE_URL=dsn(), CHEZHI_OWNER_PASSWORD_FILE=str(owner_file))
             cli(migration_env, "db-init")
             grants = (root / "migration/postgres_runtime_grants.sql").read_text().replace("chezhi_runtime", role)
+            if baseline:
+                grants="\n".join(line for line in grants.splitlines() if "chezhi_deployment" not in line)
             sql(None, stdin=grants)
             runtime_env = dict(os.environ, CHEZHI_DATABASE_URL=dsn(role), CHEZHI_OWNER_PASSWORD_FILE=str(owner_file))
             cli(runtime_env, "db-owner-init", success=False)
+            if not baseline:
+                cli(migration_env,"db-set-mode",database,"test")
             missing_port=port()
             missing_host=f"127.0.0.1:{missing_port}"
             no_owner=cli(dict(runtime_env,CHEZHI_MODE="test",CHEZHI_LISTEN=missing_host,
                               CHEZHI_PUBLIC_ORIGIN="http://"+missing_host,CHEZHI_CSRF_KEY_FILE=str(secret)),success=False)
             assert "configured owner credential" in no_owner.stderr
+            if not baseline:
+                cli(migration_env,"db-set-mode",database,"server")
             cli(migration_env, "db-owner-init")
             cli(migration_env, "db-owner-init", success=False)
             cli(migration_env, "db-check", "--migrator")
@@ -416,7 +646,18 @@ def main():
                 def restart():
                     peer.close()
                     peer.enter_context(instance(binary, env_b, db))
-                cookie, valid_key, device = test_cluster(a, b, da, sql, password, restart)
+                cookie, valid_key, device, password = test_cluster(a, b, da, sql, password, restart)
+                if not baseline and os.getenv("CHEZHI_BENCHMARK_ONLY")!="1":
+                    live_local=cli(dict(env_a,CHEZHI_MODE="local",CHEZHI_STORAGE="postgres",
+                                        CHEZHI_LISTEN=f"127.0.0.1:{port()}"),success=False)
+                    assert "different mode" in live_local.stderr
+                    reject=cli(migration_env,"db-set-mode",database,"local",success=False)
+                    assert "deployment is online" in reject.stderr
+                    cli(migration_env,"db-recover-security",database,success=False)
+                    cookie,password=check_sensitive_limit(a,b,sql,password,restart)
+                    if os.getenv("CHEZHI_BENCHMARK_ONLY")!="1":
+                        cookie=verify_secure_restore(binary,a,b,pg,sql,cli,migration_env,runtime_env,
+                                                      grants,env_a,password,valid_key,device)
                 try:
                     sql(f"ALTER DATABASE {database} ALLOW_CONNECTIONS false", db=original)
                     sql(f"SELECT pg_terminate_backend(pid,3000) FROM pg_stat_activity WHERE datname='{database}'", db=original)
@@ -426,11 +667,11 @@ def main():
                     assert b.license("validate", valid_key, device, 503)["error"]["code"] == "unavailable"
                 finally:
                     sql(f"ALTER DATABASE {database} ALLOW_CONNECTIONS true", db=original)
-                eventually(lambda: da.request("/readyz")[0] == 200)
+                eventually(lambda: da.request("/readyz")[0] == 200 and db.request("/readyz")[0] == 200)
                 assert b.page("/", cookie)[0] == 200
                 sql("DELETE FROM chezhi_rate_limits")
                 assert b.license("validate", valid_key, device)["data"]["valid"]
-                measure_dashboard_http(a,b,cookie,sql)
+                measure_dashboard_http(a,b,cookie,sql,[da,db])
             print("PASS database outage, fail-closed shared state, readiness recovery and graceful process shutdown", flush=True)
 
             proxy_port, backend, diagnostic_port = [port() for _ in range(3)]
@@ -450,6 +691,22 @@ def main():
                                                                                "X-Forwarded-Proto": "https"})[0] == 403
             print("PASS real HTTPS reverse proxy and rejection of untrusted or ambiguous forwarded transport", flush=True)
 
+            if not baseline and os.getenv("CHEZHI_BENCHMARK_ONLY")!="1":
+                run_caddy_suite(root,path,binary,common,cert_ctx,password,sql,Client,instance,eventually,port)
+            if not baseline:
+                cli(migration_env,"db-set-mode",database,"local")
+                local_port=port()
+                local_host=f"127.0.0.1:{local_port}"
+                local_env=dict(runtime_env,CHEZHI_MODE="local",CHEZHI_STORAGE="postgres",CHEZHI_LISTEN=local_host)
+                with instance(binary,local_env,Client(local_port,local_host),"/login",structured=False):
+                    wrong=cli(env_a,success=False)
+                    assert "different mode" in wrong.stderr
+                    duplicate=cli(dict(local_env,CHEZHI_LISTEN=f"127.0.0.1:{port()}"),success=False)
+                    assert "already has an instance" in duplicate.stderr
+                    assert sql("SELECT count(*) FROM chezhi_sessions")=="0"
+                    assert Client(local_port,local_host).page("/",cookie)[0]==303
+                cli(migration_env,"db-set-mode",database,"test")
+                print("PASS cross-mode isolation in both directions with real processes and old-session invalidation",flush=True)
             test_port, test_diag = port(), port()
             test_host = f"127.0.0.1:{test_port}"
             test_env = dict(common, CHEZHI_MODE="test", CHEZHI_LISTEN=test_host,
@@ -462,6 +719,8 @@ def main():
                 assert status==200 and json.loads(body)["valid"]
             print("PASS loopback-only test mode and legacy activation compatibility", flush=True)
 
+            if not baseline:
+                cli(migration_env,"db-set-mode",database,"server")
             image = os.getenv("CHEZHI_TEST_CONTAINER_IMAGE")
             if image:
                 test_container(image, suffix, path, env_a, a, da)

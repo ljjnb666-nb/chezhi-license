@@ -251,6 +251,8 @@ def main():
         print("PASS pg_dump/pg_restore and row-by-row reconciliation across nine populated tables", flush=True)
         sql(restored, stdin=grants)
         restored_env = environment(restored, runtime_role)
+        cli(restored, "db-check", "--runtime", ok=False, env=restored_env)
+        cli(restored, "db-recover-security", restored)
         cli(restored, "db-check", "--runtime", env=restored_env)
         verify_recovered_service(executable, restored_env, baseline)
         cli(restored, "db-check", "--migrator")

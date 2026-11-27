@@ -22,7 +22,10 @@ var postgresV2 string
 //go:embed postgres_v3.sql
 var postgresV3 string
 
-var postgresMigrations = []string{postgresV1, postgresV2, postgresV3}
+//go:embed postgres_v4.sql
+var postgresV4 string
+
+var postgresMigrations = []string{postgresV1, postgresV2, postgresV3, postgresV4}
 
 var errCommitUnknown = errors.New("database commit result unknown")
 
@@ -30,7 +33,10 @@ var errDatabase = errors.New("database operation failed")
 var errOrderExists = errors.New("sale reference already issued")
 var errAccountChanged = errors.New("account configuration changed; retry")
 
-type postgresStore struct{ db *sql.DB }
+type postgresStore struct {
+	db         *sql.DB
+	deployment *deploymentLease
+}
 
 func openPostgres(ctx context.Context, dsn string) (*postgresStore, error) {
 	if dsn == "" {
@@ -57,7 +63,7 @@ func openPostgres(ctx context.Context, dsn string) (*postgresStore, error) {
 		db.Close()
 		return nil, errDatabase
 	}
-	return &postgresStore{db}, nil
+	return &postgresStore{db: db}, nil
 }
 
 func (p *postgresStore) transaction(ctx context.Context, opts *sql.TxOptions, f func(context.Context, *sql.Tx) error) error {
@@ -72,6 +78,19 @@ func (p *postgresStore) runTransaction(ctx context.Context, opts *sql.TxOptions,
 		return errDatabase
 	}
 	defer tx.Rollback()
+	if p.deployment != nil {
+		// The dedicated lease normally excludes offline operations. A write
+		// also holds its own transaction lock, including after a pool reconnect.
+		if opts == nil || !opts.ReadOnly {
+			var acquired bool
+			if tx.QueryRowContext(ctx, "SELECT pg_try_advisory_xact_lock_shared($1)", deploymentLock).Scan(&acquired) != nil || !acquired {
+				return errDeployment
+			}
+		}
+		if err := p.checkDeployment(ctx, tx); err != nil {
+			return err
+		}
+	}
 	if opts == nil {
 		if err := dbExec(ctx, tx, "SELECT pg_advisory_xact_lock_shared(39184272002)"); err != nil {
 			return err
@@ -95,6 +114,14 @@ func (p *postgresStore) migrate(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 	return p.runTransaction(ctx, &sql.TxOptions{}, func(ctx context.Context, tx *sql.Tx) error {
+		var acquired bool
+		if tx.QueryRowContext(ctx, "SELECT pg_try_advisory_xact_lock($1)", deploymentLock).Scan(&acquired) != nil {
+			return errDatabase
+		}
+		if !acquired {
+			return errors.New("PostgreSQL deployment is online; stop every instance before migrating")
+		}
+
 		if err := dbExec(ctx, tx, `SELECT pg_advisory_xact_lock(39184272002);
             CREATE TABLE IF NOT EXISTS chezhi_schema (version integer PRIMARY KEY CHECK(version>0),
             applied_at timestamptz NOT NULL DEFAULT clock_timestamp())`); err != nil {

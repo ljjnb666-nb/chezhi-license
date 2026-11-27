@@ -169,6 +169,10 @@ func auditLabel(action string) string {
 		return "退出全部会话"
 	case "password_changed":
 		return "更新管理员密码"
+	case "runtime_mode_changed":
+		return "切换运行模式并清理会话"
+	case "security_recovered":
+		return "恢复后重置安全状态"
 	case "password_failed":
 		return "密码验证失败"
 	case "issue":

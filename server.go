@@ -549,7 +549,7 @@ func probeReadiness(ctx context.Context) error {
 }
 
 func (p *postgresStore) serverReady(ctx context.Context) bool {
-	if p.checkSchema(ctx) != nil {
+	if p.checkSchema(ctx) != nil || p.checkDeployment(ctx, p.db) != nil {
 		return false
 	}
 	var ready bool

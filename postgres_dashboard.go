@@ -46,38 +46,79 @@ func (p *postgresStore) dashboardPage(ctx context.Context, v *View, q url.Values
 	})
 }
 
+const overviewStatusSQL = `SELECT status,count(*) FROM (
+    SELECT ` + cardStatusSQL + ` AS status FROM chezhi_cards c
+) s GROUP BY status`
+
+// Group quantities before joining orders. Both all-time totals and the trend
+// use that same set of paid orders, with no card-row DISTINCT or second join.
+const overviewSalesSQL = `WITH quantities AS (
+    SELECT ref,count(*) AS cards FROM chezhi_cards GROUP BY ref
+), sales AS (
+    SELECT CASE WHEN o.created>=$1::numeric AND o.created<$2::numeric
+        THEN floor((o.created-$1::numeric)/86400)::int END AS day,
+        q.cards,q.cards::numeric*o.cents AS cents
+    FROM quantities q JOIN chezhi_orders o USING(ref) WHERE o.channel<>'test'
+)
+SELECT grouping(day),day,coalesce(sum(cards),0),count(*),coalesce(sum(cents),0)
+FROM sales GROUP BY GROUPING SETS ((day),())`
+
 func readOverview(ctx context.Context, tx *sql.Tx, now time.Time, d *Dashboard, o *Operations) error {
-	if err := tx.QueryRowContext(ctx, `SELECT count(*),count(*) FILTER(WHERE state='已激活'),
-        count(*) FILTER(WHERE state='未激活'),count(*) FILTER(WHERE state='已过期'),
-        count(*) FILTER(WHERE state='已吊销'),count(*) FILTER(WHERE state='已解绑'),
-        count(DISTINCT ref) FILTER(WHERE channel<>'test'),coalesce(sum(cents) FILTER(WHERE channel<>'test'),0)
-        FROM (SELECT c.ref,o.channel,o.cents,`+cardStatusSQL+` AS state
-            FROM chezhi_cards c JOIN chezhi_orders o USING(ref)) s`, sqlTime(now)).
-		Scan(&d.Stats.Total, &d.Stats.Active, &d.Stats.Unused, &d.Stats.Expired, &d.Stats.Revoked, &d.Stats.Unbound,
-			&d.Stats.Orders, &d.Stats.ManualCents); err != nil {
+	rows, err := tx.QueryContext(ctx, overviewStatusSQL, sqlTime(now))
+	if err != nil {
+		return errDatabase
+	}
+	for rows.Next() {
+		var status string
+		var count int
+		if rows.Scan(&status, &count) != nil {
+			rows.Close()
+			return errDatabase
+		}
+		d.Stats.Total += count
+		switch status {
+		case "已激活":
+			d.Stats.Active = count
+		case "未激活":
+			d.Stats.Unused = count
+		case "已过期":
+			d.Stats.Expired = count
+		case "已吊销":
+			d.Stats.Revoked = count
+		case "已解绑":
+			d.Stats.Unbound = count
+		}
+	}
+	rows.Close()
+	if rows.Err() != nil {
 		return errDatabase
 	}
 
 	t := now.In(beijing)
 	midnight := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, beijing)
-	from := midnight.AddDate(0, 0, -6)
 	o.Trend = emptyTrend(now)
-	rows, err := tx.QueryContext(ctx, `SELECT floor((o.created-$1::numeric)/86400)::int,count(*),count(DISTINCT o.ref),sum(o.cents)
-        FROM chezhi_orders o JOIN chezhi_cards c USING(ref)
-        WHERE o.channel<>'test' AND o.created>=$1::numeric AND o.created<$2::numeric GROUP BY 1`,
-		sqlTime(from), sqlTime(midnight.AddDate(0, 0, 1)))
+	rows, err = tx.QueryContext(ctx, overviewSalesSQL, sqlTime(midnight.AddDate(0, 0, -6)), sqlTime(midnight.AddDate(0, 0, 1)))
 	if err != nil {
 		return errDatabase
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var day, cards, orders int
+		var summary, cards, orders int
+		var day sql.NullInt32
 		var cents int64
-		if rows.Scan(&day, &cards, &orders, &cents) != nil || day < 0 || day >= len(o.Trend) {
+		if rows.Scan(&summary, &day, &cards, &orders, &cents) != nil {
 			return errDatabase
 		}
-		row := &o.Trend[day]
-		row.Cards, row.Orders, row.Cents = cards, orders, cents
+		if summary == 1 {
+			d.Stats.Orders, d.Stats.ManualCents = orders, cents
+			continue
+		}
+		if day.Valid {
+			if day.Int32 < 0 || int(day.Int32) >= len(o.Trend) {
+				return errDatabase
+			}
+			o.Trend[day.Int32].Cards, o.Trend[day.Int32].Orders, o.Trend[day.Int32].Cents = cards, orders, cents
+		}
 	}
 	if rows.Err() != nil {
 		return errDatabase
@@ -93,7 +134,12 @@ func readCardsPage(ctx context.Context, tx *sql.Tx, now time.Time, d *Dashboard,
 	const from = ` FROM chezhi_cards c JOIN chezhi_orders o USING(ref)`
 	const filter = ` WHERE ($2='' OR ` + cardStatusSQL + `=$2)` + cardSearchSQL + ` AND ($4='' OR o.channel=$4)`
 	args := []any{sqlTime(now), d.Status, strings.ToLower(d.Q), d.Channel}
-	if tx.QueryRowContext(ctx, "SELECT (SELECT count(*) FROM chezhi_cards),count(*)"+from+filter, args...).Scan(&d.Stats.Total, &d.Count) != nil {
+	if d.Status == "" && d.Q == "" && d.Channel == "" {
+		if tx.QueryRowContext(ctx, "SELECT count(*) FROM chezhi_cards").Scan(&d.Count) != nil {
+			return errDatabase
+		}
+		d.Stats.Total = d.Count
+	} else if tx.QueryRowContext(ctx, "SELECT (SELECT count(*) FROM chezhi_cards),count(*)"+from+filter, args...).Scan(&d.Stats.Total, &d.Count) != nil {
 		return errDatabase
 	}
 	d.Page, d.Pages = pageNum(q.Get("page"), d.Count)
@@ -121,18 +167,28 @@ func readDevicesPage(ctx context.Context, tx *sql.Tx, now time.Time, o *Operatio
 	return nil
 }
 
+const orderFilterSQL = ` WHERE ($1='' OR o.channel=$1) AND ($2='' OR strpos(lower(o.ref COLLATE "pg_c_utf8"),$2)>0)`
+const ordersPageSQL = `WITH page AS (
+    SELECT o.ref,o.channel,o.created,o.days,o.cents,last_card.position
+    FROM chezhi_orders o
+    JOIN LATERAL (SELECT c.position FROM chezhi_cards c WHERE c.ref=o.ref ORDER BY c.position DESC LIMIT 1) last_card ON true
+    ` + orderFilterSQL + ` ORDER BY last_card.position DESC LIMIT 20 OFFSET $3
+)
+SELECT p.ref,p.channel,p.created,p.days,q.cards,q.activated,q.revoked,q.cards::numeric*p.cents
+FROM page p CROSS JOIN LATERAL (
+    SELECT count(*) AS cards,count(*) FILTER (WHERE c.activated IS NOT NULL) AS activated,
+        count(*) FILTER (WHERE c.revoked) AS revoked FROM chezhi_cards c WHERE c.ref=p.ref
+) q ORDER BY p.position DESC`
+
 func readOrdersPage(ctx context.Context, tx *sql.Tx, o *Operations, q url.Values) error {
-	const filter = ` WHERE ($1='' OR o.channel=$1) AND ($2='' OR strpos(lower(o.ref COLLATE "pg_c_utf8"),$2)>0)`
 	args := []any{o.Channel, strings.ToLower(o.Q)}
-	if tx.QueryRowContext(ctx, "SELECT count(*) FROM chezhi_orders o"+filter+
+	if tx.QueryRowContext(ctx, "SELECT count(*) FROM chezhi_orders o"+orderFilterSQL+
 		" AND EXISTS (SELECT 1 FROM chezhi_cards c WHERE c.ref=o.ref)", args...).Scan(&o.Count) != nil {
 		return errDatabase
 	}
 	o.Page, o.Pages = pageNum(q.Get("op"), o.Count)
-	rows, err := tx.QueryContext(ctx, `SELECT o.ref,o.channel,o.created,o.days,count(*),
-        count(*) FILTER (WHERE c.activated IS NOT NULL),count(*) FILTER (WHERE c.revoked),sum(o.cents)
-        FROM chezhi_orders o JOIN chezhi_cards c USING(ref)`+filter+
-		" GROUP BY o.ref ORDER BY max(c.position) DESC LIMIT 20 OFFSET $3", append(args, (o.Page-1)*20)...)
+	rows, err := tx.QueryContext(ctx, ordersPageSQL, append(args, (o.Page-1)*20)...)
+
 	if err != nil {
 		return errDatabase
 	}

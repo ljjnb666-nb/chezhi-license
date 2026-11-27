@@ -192,7 +192,12 @@ pg_restore --dbname=chezhi_restore --exit-on-error --single-transaction --no-own
 
 Verify the restored database with `db-check --migrator`, compare row counts
 and data reconciliation results against the source backup baseline, and reapply
-the runtime grants. A structurally valid smaller dataset can pass a standalone
+the runtime grants. Use a newly named logical restore target while services
+are offline. On V4 run `db-recover-security <restored-database-name>` as the
+migration owner before starting a PostgreSQL application process. It invalidates
+snapshot sessions and rate buckets, advances deployment identity and appends
+an audit. The mode is retained. The command rejects a live, already-bound or
+incorrectly named target. [Standalone mode and recovery runbook](SERVER.md). A structurally valid smaller dataset can pass a standalone
 integrity check, so baseline comparison is required for completeness. Run
 `db-check --runtime`, then test login and device authorization on the isolated
 restored service before switching. For standalone deployments, clear the ephemeral session and rate tables before opening a restored database to traffic. See the standalone runbook. A backup

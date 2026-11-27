@@ -212,7 +212,15 @@ func databaseCommand(ctx context.Context, args []string) error {
 	command := args[0]
 	var d legacyData
 	profile := ""
-	if command == "db-import" {
+	if command == "db-set-mode" {
+		if len(args) != 3 || (args[2] != "local" && args[2] != "server" && args[2] != "test") {
+			return errors.New("usage: db-set-mode <database-name> <local|server|test>")
+		}
+	} else if command == "db-recover-security" {
+		if len(args) != 2 {
+			return errors.New("usage: db-recover-security <restored-database-name>")
+		}
+	} else if command == "db-import" {
 		if len(args) != 3 || (args[1] != "--dry-run" && args[1] != "--apply") {
 			return errors.New("usage: db-import --dry-run|--apply <legacy-dir>")
 		}
@@ -258,6 +266,15 @@ func databaseCommand(ctx context.Context, args []string) error {
 	}
 	defer p.db.Close()
 	switch command {
+	case "db-set-mode", "db-recover-security":
+		if err = p.checkSchema(ctx); err != nil {
+			return err
+		}
+		mode := ""
+		if command == "db-set-mode" {
+			mode = args[2]
+		}
+		err = p.offlineSecurity(ctx, args[1], mode)
 	case "db-owner-init":
 		if err = p.checkSchema(ctx); err != nil {
 			return err

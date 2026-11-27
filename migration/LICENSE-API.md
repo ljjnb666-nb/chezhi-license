@@ -47,10 +47,15 @@ and signed authorizations are reserved for P3.
 | 405 | `method_not_allowed` |
 | 413 | `body_too_large` |
 | 415 | `json_required` |
-| 429 | `rate_limited`; honor Retry-After |
+| 429 | `rate_limited`; honor Retry-After. Native authorization and browser activation share the deployment licensing budget. |
 | 503 | `busy`, `unavailable`; retry with bounded backoff |
 
 Additional response fields may be added to v1; clients should ignore fields
 they do not recognize and fail closed on unknown authorization statuses.
 Incompatible semantics use a new URL version. Local/test modes retain the
 existing `/api/demo/activate` contract for the demo client.
+
+In standalone mode the licensing budget uses the socket peer for direct
+TLS or the single source overwritten by the approved proxy. It is shared
+across instances and independent of the administrator login and password
+re-verification budgets. A database or shared-state outage returns 503.

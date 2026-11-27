@@ -143,7 +143,7 @@ func validateState(s State) error {
 			if a.CardID != "" || !memberName.MatchString(a.Target) {
 				return invalid()
 			}
-		case "support_config", "plans_config", "login_success", "login_failed", "logout", "logout_all", "password_changed", "password_failed":
+		case "support_config", "plans_config", "login_success", "login_failed", "logout", "logout_all", "password_changed", "password_failed", "runtime_mode_changed", "security_recovered":
 			if a.CardID != "" || a.Target != "" {
 				return invalid()
 			}

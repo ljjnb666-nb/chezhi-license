@@ -160,7 +160,20 @@ func (g *adminGateway) handleOwnerPassword(rw http.ResponseWriter, r *http.Reque
 		render("请输入 14–128 字节范围内的长密码，并确保两次输入一致（至少 14 个字符）。")
 		return
 	}
-	if !g.budget() {
+	allowed := false
+	if _, shared := r.Context().Value(serverRequestKey{}).(serverRequest); shared {
+		var err error
+		// All sessions, sources and instances share one budget for the owner.
+		allowed, err = g.w.s.pg.allowShared(r.Context(), "account", digestSecret("account:"+s.name), 12, 5)
+		if err != nil {
+			rw.WriteHeader(http.StatusServiceUnavailable)
+			render("密码验证暂不可用。")
+			return
+		}
+	} else {
+		allowed = g.budget()
+	}
+	if !allowed {
 		rw.Header().Set("Retry-After", "60")
 		rw.WriteHeader(429)
 		render("尝试次数过多，请稍后再试。")

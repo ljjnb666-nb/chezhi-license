@@ -310,7 +310,7 @@ func run(ctx context.Context, args []string) error {
 				return errors.New("unexpected health probe arguments")
 			}
 			return probeReadiness(ctx)
-		case "db-init", "db-check", "db-import", "db-owner-init":
+		case "db-init", "db-check", "db-import", "db-owner-init", "db-set-mode", "db-recover-security":
 			return databaseCommand(ctx, args)
 		}
 	}
@@ -336,6 +336,11 @@ func run(ctx context.Context, args []string) error {
 		if err := p.checkSchema(ctx); err != nil {
 			return err
 		}
+		release, err := p.attachDeployment(ctx, mode)
+		if err != nil {
+			return err
+		}
+		defer release()
 		return serveIndependent(ctx, config, p)
 	case "", "local":
 	default:
@@ -356,6 +361,11 @@ func run(ctx context.Context, args []string) error {
 		if err = p.checkSchema(ctx); err != nil {
 			return err
 		}
+		release, err := p.attachDeployment(ctx, "local")
+		if err != nil {
+			return err
+		}
+		defer release()
 		s = &Store{pg: p, now: time.Now}
 	case "", "json":
 		var release func()
