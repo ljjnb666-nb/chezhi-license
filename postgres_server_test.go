@@ -331,9 +331,7 @@ func TestPostgresServerUpgradeV4RetainsBusinessAndClearsOldSecurity(t *testing.T
 		pgExec(t, s, migration)
 		pgExec(t, s, "INSERT INTO chezhi_schema(version) VALUES ($1)", i+1)
 	}
-	if _, err := s.issue(30, 1, 700, "wechat", "upgrade-order", "admin"); err != nil {
-		t.Fatal(err)
-	}
+	seedHistoricalCards(t,s,30,1,700,"wechat","upgrade-order")
 	if err := s.pg.initializeOwner(ctx, "synthetic migration owner"); err != nil {
 		t.Fatal(err)
 	}
