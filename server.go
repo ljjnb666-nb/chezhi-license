@@ -26,6 +26,7 @@ import (
 
 type serverConfig struct {
 	demo                                               bool
+	signer *serverSigner
 	listen, diagnostics, origin, host, csrf            string
 	proxy                                              []netip.Prefix
 	certificate                                        *tls.Certificate
@@ -431,6 +432,10 @@ func serveIndependent(ctx context.Context, c serverConfig, p *postgresStore) err
 	if err := p.transaction(ctx, &sql.TxOptions{ReadOnly: true}, verifyRuntimeRole); err != nil {
 		return errors.New("standalone server requires the restricted PostgreSQL runtime grants; run db-check --runtime")
 	}
+	signer, err := p.configureSigner(ctx)
+	if err != nil { return err }
+	if signer != nil && !c.secure { return errors.New("secure signing requires HTTPS") }
+	c.signer = signer
 	listener, err := net.Listen("tcp", c.listen)
 	if err != nil {
 		return errors.New("cannot open configured listener")
