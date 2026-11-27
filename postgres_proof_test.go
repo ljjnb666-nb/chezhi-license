@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"chezhi.local/licenseprototype/internal/proof"
+	"chezhi.local/licenseprototype/internal/license"
 )
 
 func signTestChallenge(t *testing.T, c proof.Challenge, key *ecdsa.PrivateKey) []byte {
@@ -53,7 +54,12 @@ func TestPostgresProofChallenge(t *testing.T) {
 	}
 	public := elliptic.Marshal(key.Curve, key.X, key.Y)
 	scope := proof.Scope{Deployment: sha256.Sum256([]byte("fixture deployment")), Product: "chezhi"}
-	card := sha256.Sum256([]byte("fixture card hash"))
+	keys, err := s.issue(30, 1, 100, "test", "proof-epoch-fixture")
+	if err != nil { t.Fatal(err) }
+	var card proof.Digest
+	b, err := hex.DecodeString(license.HashKey(keys[0]))
+	if err != nil { t.Fatal(err) }
+	copy(card[:], b)
 	issue := func() proof.Challenge {
 		t.Helper()
 		c, err := s.pg.issueProofChallenge(ctx, scope, proof.Activate, card, public)
