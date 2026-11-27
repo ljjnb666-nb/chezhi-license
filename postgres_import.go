@@ -130,11 +130,17 @@ func (p *postgresStore) importLegacy(ctx context.Context, d legacyData) error {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 	return p.runTransaction(ctx, &sql.TxOptions{}, func(ctx context.Context, tx *sql.Tx) error {
+		var offline bool
+		if tx.QueryRowContext(ctx, "SELECT pg_try_advisory_xact_lock($1)", deploymentLock).Scan(&offline) != nil { return errDatabase }
+		if !offline { return errors.New("stop every instance before legacy import") }
+		policy, err := readSigningPolicy(ctx, tx)
+		if err != nil { return err }
+		if policy != nil { return errors.New("legacy import must precede signing policy initialization") }
 		if err := dbExec(ctx, tx, "SELECT pg_advisory_xact_lock(39184272002)"); err != nil {
 			return err
 		}
 		var fingerprint string
-		err := tx.QueryRowContext(ctx, "SELECT fingerprint FROM chezhi_import WHERE singleton").Scan(&fingerprint)
+		err = tx.QueryRowContext(ctx, "SELECT fingerprint FROM chezhi_import WHERE singleton").Scan(&fingerprint)
 		switch {
 		case err == nil && fingerprint == d.fingerprint:
 			return errors.New("this legacy snapshot was already imported")
@@ -212,7 +218,9 @@ func databaseCommand(ctx context.Context, args []string) error {
 	command := args[0]
 	var d legacyData
 	profile := ""
-	if command == "db-set-mode" {
+	if command == "db-set-signing-key" {
+		if len(args) != 4 { return errors.New("usage: db-set-signing-key <database-name> <none|current-key-id> <public-key-hex>") }
+	} else if command == "db-set-mode" {
 		if len(args) != 3 || (args[2] != "local" && args[2] != "server" && args[2] != "test") {
 			return errors.New("usage: db-set-mode <database-name> <local|server|test>")
 		}
@@ -266,6 +274,12 @@ func databaseCommand(ctx context.Context, args []string) error {
 	}
 	defer p.db.Close()
 	switch command {
+	case "db-signing-info":
+		if err = p.checkSchema(ctx); err != nil { return err }
+		err = p.printSigningInfo(ctx)
+	case "db-set-signing-key":
+		if err = p.checkSchema(ctx); err != nil { return err }
+		err = p.setSigningPolicy(ctx,args[1],args[2],args[3])
 	case "db-set-mode", "db-recover-security":
 		if err = p.checkSchema(ctx); err != nil {
 			return err

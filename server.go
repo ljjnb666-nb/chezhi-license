@@ -26,6 +26,7 @@ import (
 
 type serverConfig struct {
 	demo                                               bool
+	signer *serverSigner
 	listen, diagnostics, origin, host, csrf            string
 	proxy                                              []netip.Prefix
 	certificate                                        *tls.Certificate
@@ -297,7 +298,8 @@ func (h *serverRouter) ServeHTTP(raw http.ResponseWriter, r *http.Request) {
 	id := randomToken()[:32]
 	group, label := 0, "admin"
 	queue := h.admin
-	isAPI := strings.HasPrefix(r.URL.Path, "/api/v1/") || r.URL.Path == "/api/v1"
+	v2 := isV2Path(r.URL.Path)
+	isAPI := v2 || strings.HasPrefix(r.URL.Path, "/api/v1/") || r.URL.Path == "/api/v1"
 	switch {
 	case isAPI || r.URL.Path == "/activate" || r.URL.Path == "/purchase" || r.URL.Path == "/api/demo/activate":
 		group, label, queue = 1, "public", h.public
@@ -320,6 +322,10 @@ func (h *serverRouter) ServeHTTP(raw http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Strict-Transport-Security", "max-age=31536000")
 	}
 	reject := func(status int, code string) {
+		if v2 {
+			writeV2(w,status,id,nil,code)
+			return
+		}
 		if isAPI {
 			writeAPI(w, status, id, nil, code)
 			return
@@ -431,6 +437,10 @@ func serveIndependent(ctx context.Context, c serverConfig, p *postgresStore) err
 	if err := p.transaction(ctx, &sql.TxOptions{ReadOnly: true}, verifyRuntimeRole); err != nil {
 		return errors.New("standalone server requires the restricted PostgreSQL runtime grants; run db-check --runtime")
 	}
+	signer, err := p.configureSigner(ctx)
+	if err != nil { return err }
+	if signer != nil && !c.secure { return errors.New("secure signing requires HTTPS") }
+	c.signer = signer
 	listener, err := net.Listen("tcp", c.listen)
 	if err != nil {
 		return errors.New("cannot open configured listener")

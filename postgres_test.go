@@ -463,9 +463,7 @@ func TestPostgresUpgradeExisting(t *testing.T) {
 	pgExec(t, store, "CREATE TABLE chezhi_schema(version integer PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT clock_timestamp())")
 	pgExec(t, store, postgresV1)
 	pgExec(t, store, "INSERT INTO chezhi_schema(version) VALUES (1)")
-	if _, err := store.issue(7, 2, 450, "test", "existing-v1"); err != nil {
-		t.Fatal(err)
-	}
+	seedHistoricalCards(t,store,7,2,450,"test","existing-v1")
 	before := pgSnapshot(t, store)
 	if store.pg.checkSchema(context.Background()) == nil {
 		t.Fatal("outdated schema accepted")

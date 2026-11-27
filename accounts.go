@@ -233,7 +233,7 @@ func (s *Store) backupContext(ctx context.Context) ([]byte, error) {
 	var snapshot State
 	var catalog []Plan
 	var err error
-	if _, shared := ctx.Value(serverRequestKey{}).(serverRequest); shared {
+	if s.pg != nil {
 		snapshot, catalog, err = s.pg.readServerExport(ctx, true)
 	} else {
 		snapshot, catalog, err = s.readView(ctx, true)
@@ -302,6 +302,7 @@ func (w Web) downloadBackup(rw http.ResponseWriter, r *http.Request) {
 		return
 	}
 	b, e := w.s.backupContext(r.Context())
+	if errors.Is(e, errSecureBackup) { http.Error(rw, "安全授权数据须使用 PostgreSQL 原生备份", http.StatusConflict); return }
 	if errors.Is(e, errExportLimit) {
 		http.Error(rw, "数据量超过交互备份上限，请使用 PostgreSQL 原生备份", 422)
 		return

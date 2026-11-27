@@ -10,6 +10,7 @@ from collections import Counter
 from statistics import median
 from dashboard_plans import capture_plans
 from caddy_acceptance import run_caddy_suite
+from v2_acceptance import run_v2_suite
 import json
 import os
 from pathlib import Path
@@ -605,7 +606,7 @@ def main():
             cli(migration_env, "db-init")
             grants = (root / "migration/postgres_runtime_grants.sql").read_text().replace("chezhi_runtime", role)
             if baseline:
-                grants="\n".join(line for line in grants.splitlines() if "chezhi_deployment" not in line)
+                grants="\n".join(line for line in grants.splitlines() if "chezhi_deployment" not in line and "chezhi_challenges" not in line and "chezhi_secure_bindings" not in line and "auth_epoch" not in line and "chezhi_signing_policy" not in line and "chezhi_signing_history" not in line)
             sql(None, stdin=grants)
             runtime_env = dict(os.environ, CHEZHI_DATABASE_URL=dsn(role), CHEZHI_OWNER_PASSWORD_FILE=str(owner_file))
             cli(runtime_env, "db-owner-init", success=False)
@@ -727,6 +728,9 @@ def main():
             image = os.getenv("CHEZHI_TEST_CONTAINER_IMAGE")
             if image:
                 test_container(image, suffix, path, env_a, a, da)
+            if not baseline and os.getenv("CHEZHI_BENCHMARK_ONLY")!="1":
+                run_v2_suite(root,path,binary,common,migration_env,runtime_env,password,grants,
+                             pg,sql,cli,Client,instance,eventually,port,cert_ctx)
     finally:
         pg("dropdb", "--force", database)
         sql(f"DROP ROLE IF EXISTS {role}", db=original)

@@ -1,0 +1,11 @@
+{
+    "table/chezhi_secure_bindings": "[\"r\", \"p\", false]",
+    "column/chezhi_secure_bindings/card_id": "[\"text\", true, \"\", null]",
+    "column/chezhi_secure_bindings/public_key": "[\"text\", true, \"\", null]",
+    "column/chezhi_secure_bindings/revision": "[\"bigint\", true, \"\", null]",
+    "constraint/chezhi_secure_bindings/chezhi_secure_bindings_pkey": "[true, \"PRIMARY KEY (card_id)\"]",
+    "constraint/chezhi_secure_bindings/chezhi_secure_bindings_card_id_fkey": "[true, \"FOREIGN KEY (card_id) REFERENCES chezhi_cards(id)\"]",
+    "constraint/chezhi_secure_bindings/chezhi_secure_bindings_public_key_check": "[true, \"CHECK (((public_key = ''::text) OR (public_key ~ '^04[0-9a-f]{128}$'::text)))\"]",
+    "constraint/chezhi_secure_bindings/chezhi_secure_bindings_revision_check": "[true, \"CHECK ((revision > 0))\"]",
+    "index/chezhi_secure_bindings/chezhi_secure_bindings_pkey": "[true, true, true, \"CREATE UNIQUE INDEX chezhi_secure_bindings_pkey ON public.chezhi_secure_bindings USING btree (card_id)\"]"
+}

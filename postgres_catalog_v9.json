@@ -1,0 +1,12 @@
+{
+    "table/chezhi_signing_history": "[\"r\", \"p\", false]",
+    "column/chezhi_signing_history/deployment": "[\"text\", true, \"\", null]",
+    "column/chezhi_signing_history/public_key": "[\"text\", true, \"\", null]",
+    "column/chezhi_signing_history/action": "[\"text\", true, \"\", null]",
+    "column/chezhi_signing_history/recorded_at": "[\"timestamp with time zone\", true, \"\", \"clock_timestamp()\"]",
+    "constraint/chezhi_signing_history/chezhi_signing_history_pkey": "[true, \"PRIMARY KEY (deployment)\"]",
+    "constraint/chezhi_signing_history/chezhi_signing_history_deployment_check": "[true, \"CHECK ((deployment ~ '^[0-9a-f]{64}$'::text))\"]",
+    "constraint/chezhi_signing_history/chezhi_signing_history_public_key_check": "[true, \"CHECK ((public_key ~ '^[0-9a-f]{64}$'::text))\"]",
+    "constraint/chezhi_signing_history/chezhi_signing_history_action_check": "[true, \"CHECK ((action = ANY (ARRAY['initialize'::text, 'rotate'::text, 'recovery'::text, 'migration_baseline'::text])))\"]",
+    "index/chezhi_signing_history/chezhi_signing_history_pkey": "[true, true, true, \"CREATE UNIQUE INDEX chezhi_signing_history_pkey ON public.chezhi_signing_history USING btree (deployment)\"]"
+}
