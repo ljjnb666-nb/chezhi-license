@@ -115,6 +115,9 @@ func (p *postgresStore) cleanShared(ctx context.Context) error {
 		if err := dbExec(ctx, tx, `DELETE FROM chezhi_sessions WHERE expires<=clock_timestamp()`); err != nil {
 			return err
 		}
+		if err := dbExec(ctx, tx, `DELETE FROM chezhi_challenges WHERE expires<=floor(extract(epoch FROM clock_timestamp()))::bigint`); err != nil {
+			return err
+		}
 		return dbExec(ctx, tx, `DELETE FROM chezhi_rate_limits WHERE (scope,source,window_start) IN (
             SELECT scope,source,window_start FROM chezhi_rate_limits
             WHERE window_start<floor(extract(epoch FROM clock_timestamp()) / 60)::bigint-1
