@@ -143,7 +143,13 @@ def exercise_capacity(folder, a, b, diagnostics, query, scope, card, key, public
             value = {name:int(count) for name,count in re.findall(
                 r"^(chezhi_db_[a-z_]+) (\d+)$",body,re.M)}
             for name in ("chezhi_http_requests_total","chezhi_http_errors_total"):
-                match = re.search(r'^'+name+r'\{group="public"\} (\d+)
+                match = re.search(r"^"+name+r'\{group="public"\} (\d+)$',body,re.M)
+                assert match is not None,"public request metric missing"
+                value[name] = int(match[1])
+            assert {"chezhi_db_connections_open","chezhi_db_connections_in_use",
+                    "chezhi_db_connections_idle","chezhi_db_pool_waits_total"} <= value.keys()
+            values.append(value)
+        return values
     def pctl(values, p):
         ordered = sorted(values)
         return ordered[(p*len(ordered)+99)//100-1]
@@ -339,13 +345,17 @@ def run_v2_suite(root, folder, binary, common, migration_env, runtime_env, passw
                         {"Origin":"https://example.invalid"})=="browser_origin_forbidden"
             assert post(a,"challenge",dict(key=card,public_key=p2,operation="validate",extra="x"),400)=="invalid_json"
             assert query("SELECT count(*) FROM chezhi_secure_bindings")=="3"
+            dump_started=time.perf_counter()
             pg("pg_dump","-d",live,"-Fc","--no-owner","--no-acl","-f",dump)
+            dump_seconds=time.perf_counter()-dump_started
             assert post(b,"validate",pending,200)["valid"]
         print("PASS V2 real two-process TLS, independent OpenSSL transcripts/signatures, atomic replay, foreign key denial, unbind/rebind, revoke and legacy downgrade",flush=True)
 
+        recovery_started=time.perf_counter()
         pg("createdb",restored)
         created_restore=True
         pg("pg_restore","-d",restored,"--exit-on-error","--single-transaction","--no-owner","--no-acl",dump)
+        restore_seconds=time.perf_counter()-recovery_started
         sql(None,db=restored,stdin=grants)
         er,rr,dr,_=endpoint(restored,signer)
         cli(er,success=False)
@@ -365,6 +375,8 @@ def run_v2_suite(root, folder, binary, common, migration_env, runtime_env, passw
             verify(folder,renewed,new_scope,p2,card,public_key)
             assert post(rr,"validate",prepare(rr,new_scope,"validate",revoked,k1,p1),403)=="authorization_denied"
             assert rr.license("activate",card,"legacy")["data"]["status"]=="secure_protocol_required"
+        print(f"V2_RECOVERY_TIMING dump_seconds={dump_seconds:.3f} restore_create_seconds={restore_seconds:.3f} "
+              f"verified_recovery_seconds={time.perf_counter()-recovery_started:.3f}",flush=True)
         print("PASS V2 native logical restore, old challenge rejection, changed scope, preserved secure bindings and revoked state",flush=True)
 
         new_signer,new_key=make_signer("v2-rotated-"+suffix)
