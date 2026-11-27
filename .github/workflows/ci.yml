@@ -137,6 +137,20 @@ jobs:
           & $exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - if: runner.os == 'Windows'
+        name: Windows native online interop and coordinator
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:CGO_ENABLED = '0'
+          go build -tags sdkfixture -trimpath -o bin/SdkTestServer.exe ./cmd/sdk-test-server
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+          $sources = @('AuthorizationState.cs','WindowsDeviceKey.cs','NativeLicenseClient.cs','LicenseCoordinator.cs','OnlineSmoke.cs') | ForEach-Object { (Resolve-Path -LiteralPath ('sdk/windows/'+$_)).Path }
+          $exe = Join-Path $PWD 'bin\OnlineSmoke.exe'
+          & $csc /nologo /target:exe /platform:x64 /r:System.Core.dll "/out:$exe" $sources
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & ./sdk/windows/Run-OnlineSmoke.ps1 -Bin bin
+      - if: runner.os == 'Windows'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: windows-x64-ci-build

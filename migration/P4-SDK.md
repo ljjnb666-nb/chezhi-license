@@ -177,3 +177,36 @@ ACL, actual reboot and real campus connectivity remain acceptance gates.
 Run 46006858825: 10/10, actual software CNG/DPAPI and ABI tests passed.
 Optimized dashboard median P95 targets passed but mixed 100k read 503
 15/320, issue 503 8/9; P5 capacity remains open.
+
+### Managed native bridge and online interop candidate
+
+Run 46007582154: 10/10; actual Windows authorization-state test passed.
+Optimized 100k mixed read 503 16/320, issue 503 14/15; P5 remains open.
+
+NativeLicenseClient uses an absolute DLL path, rejects reparse attributes,
+holds the file against writes/deletion during SHA-256 checking/loading,
+uses LoadLibraryEx with DLL-directory/System32 search and checks ABI v1.
+The expected digest must come from independently authenticated release
+configuration, and the installation directory and all parents must be
+protected against untrusted writes/rename. This is not full filesystem
+race protection or Authenticode verification. Go DLL stays loaded.
+LicenseCoordinator owns one fixed card/device/trust context, starts native
+work on the default task scheduler, retains the device through completion,
+invalidates late results on cancel/network/shutdown, and clears its card
+byte buffer and releases CNG handles after the final native call. There is
+no immediate native cancellation; same-user memory/administrators are out
+of scope. UI must marshal results, enforce admission at actual commands,
+and never gate cleanup. No card persistence or automatic enrollment added.
+
+OnlineSmoke uses an actual x64 C# executable, hash-checked Go DLL, persistent
+software CNG key and real loopback TLS exchange against a disposable
+protocol fixture. A fresh test-only CA is imported into CurrentUser Root
+only on hosted CI and removed in finally. Fixture has no database and no
+production data, and is built only with sdkfixture. It verifies the device
+proof, signs nonce-bound credentials, and supplies denied and wrong-nonce
+responses. Tests cover activate/validate/renew, wrong signing trust, wrong
+nonce, wrong DLL hash and network/shutdown state. The Go SDK real
+PostgreSQL/TLS tests remain mandatory; successful Windows fixture testing
+does not constitute native-to-production-server or actual campus acceptance.
+Full online chain with actual deployed server and physical TPM remains P4.5.
+Exact new head CI pending.
