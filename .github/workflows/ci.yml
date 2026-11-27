@@ -81,11 +81,339 @@ jobs:
           go build -trimpath -buildmode=c-shared -o bin/chezhi_license_sdk.dll ./cmd/windows-license-sdk
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
-          & $csc /nologo /target:exe /platform:x64 /out:bin/AbiSmoke.exe sdk/windows/AbiSmoke.cs
+          $smoke = (Resolve-Path -LiteralPath 'sdk/windows/AbiSmoke.cs').Path
+          $abiOut = Join-Path $PWD 'bin\AbiSmoke.exe'
+          & $csc /nologo /target:exe /platform:x64 "/out:$abiOut" $smoke
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & ./bin/AbiSmoke.exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           (Get-FileHash bin/chezhi_license_sdk.dll -Algorithm SHA256).Hash
+      - if: runner.os == 'Windows'
+        name: Windows persistent CNG software key lifecycle
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+          $src = (Resolve-Path -LiteralPath 'sdk/windows/WindowsDeviceKey.cs').Path
+          $test = (Resolve-Path -LiteralPath 'sdk/windows/DeviceKeySmoke.cs').Path
+          $exe = Join-Path $PWD 'bin\DeviceKeySmoke.exe'
+          & $csc /nologo /target:exe /platform:x64 /r:System.Core.dll "/out:$exe" $src $test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $slot = [Guid]::NewGuid().ToString()
+          $fingerprint = (& $exe create $slot | Select-Object -Last 1)
+          if ($LASTEXITCODE -ne 0 -or $fingerprint -notmatch '^[0-9a-f]{64}
+      - if: runner.os == 'Windows'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: windows-x64-ci-build
+          path: bin/chezhi-license-win-x64.exe
+          if-no-files-found: error
+          retention-days: 7
+
+  integration:
+    name: HTTP and migration
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5
+        with:
+          go-version: '1.26.11'
+          cache: false
+      - name: Build and run live HTTP tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p bin
+          CGO_ENABLED=0 go build -trimpath -o bin/chezhi-license-linux-amd64 .
+          for test in http_smoke.py client_http_smoke.py session_http_smoke.py members_http_smoke.py owner_http_smoke.py; do
+            echo "Running $test"
+            timeout 120s python3 "$test" ./bin/chezhi-license-linux-amd64
+          done
+      - name: Migration and recovery
+        run: |
+          (cd migration && python3 -m unittest -v)
+          timeout 120s python3 migration/runtime_rehearsal.py ./bin/chezhi-license-linux-amd64
+      - name: JavaScript syntax
+        run: node --check admin-ui.js
+
+  repository-hygiene:
+    name: Repository hygiene
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Reject committed runtime files and obvious credentials
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import pathlib, re, subprocess, sys
+          paths = subprocess.check_output(['git', 'ls-files', '-z']).decode().split('\x00')
+          forbidden = {'state.json', 'plans.json', 'members.json', 'owner.json', 'instance.lock', '.pgpass', 'pgpass.conf', 'pg_service.conf'}
+          extensions = {'.exe', '.db', '.sqlite', '.sqlite3', '.zip', '.log', '.jsonl', '.pem', '.key', '.p12', '.pfx', '.dump', '.pgdump', '.backup', '.bak'}
+          patterns = [r'-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----', r'gh[pousr]_[A-Za-z0-9]{30,}', r'github_pat_[A-Za-z0-9_]{40,}', r'AKIA[A-Z0-9]{16}']
+          bad = []
+          for name in filter(None, paths):
+              p = pathlib.Path(name)
+              if p.parts[0].lower() in {'data', 'bin', 'backups'} or p.name.lower() in forbidden or p.suffix.lower() in extensions or p.name.lower().endswith(('.sql.gz', '.dump.gz', '.pgdump.gz')) or (p.name.lower().startswith('.env') and p.name != '.env.example'):
+                  bad.append((name, 'runtime or secret file'))
+              if p.as_posix() == '.github/workflows/ci.yml':
+                  continue  # scanner contains its own pattern definitions
+              raw = p.read_bytes()
+              if raw.startswith(b'PGDMP') or b'-- PostgreSQL database dump' in raw[:1024]:
+                  bad.append((name, 'PostgreSQL dump content'))
+              if any(re.search(pattern, raw.decode('utf-8', errors='replace')) for pattern in patterns):
+                  bad.append((name, 'possible credential'))
+          for name, reason in bad:
+              print(f'{reason}: {name}', file=sys.stderr)
+          if bad:
+              sys.exit(1)
+          print('Repository hygiene checks passed; not a comprehensive secret or vulnerability scan.')
+          PY
+
+  dependency-security:
+    name: Dependency and toolchain security
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5
+        with:
+          go-version: '1.26.11'
+          cache: false
+      - name: Verify modules and scan the shipping toolchain
+        env:
+          CGO_ENABLED: '0'
+        run: |
+          set -euo pipefail
+          mkdir -p bin
+          go version | tee bin/security-verification.txt
+          go mod download
+          go mod verify | tee -a bin/security-verification.txt
+          go run golang.org/x/vuln/cmd/govulncheck@v1.10.0 ./... | tee -a bin/security-verification.txt
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: dependency-security
+          path: bin/security-verification.txt
+          retention-days: 7
+          if-no-files-found: warn
+
+  browser:
+    name: Chromium browser smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5
+        with:
+          go-version: '1.26.11'
+          cache: false
+      - name: Prepare browser test environment
+        run: |
+          python3 -m venv .ci-venv
+          .ci-venv/bin/python -m pip install --disable-pip-version-check playwright==1.56.0
+          # The hosted image's unrelated Microsoft APT feed can return 403.
+          # Temporarily exclude only its dedicated source files, retaining
+          # Ubuntu security repositories and normal signed-package checks.
+          saved="$(mktemp -d)"
+          restore_sources() {
+            for file in "$saved"/*; do
+              [ -f "$file" ] || continue
+              sudo mv "$file" /etc/apt/sources.list.d/
+            done
+            rmdir "$saved"
+          }
+          trap restore_sources EXIT
+          for file in /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/microsoft-prod.sources; do
+            if [ -f "$file" ] && grep -q 'packages.microsoft.com/ubuntu/24.04/prod' "$file"; then
+              sudo mv "$file" "$saved/"
+            fi
+          done
+          .ci-venv/bin/python -m playwright install --with-deps chromium
+      - name: Run Chromium tests
+        run: |
+          mkdir -p bin
+          CGO_ENABLED=0 go build -trimpath -o bin/chezhi-license-linux-amd64 .
+          timeout 180s .ci-venv/bin/python browser_e2e.py ./bin/chezhi-license-linux-amd64
+
+  postgres:
+    name: PostgreSQL persistence and HTTP
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17.10-alpine@sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193
+        env:
+          POSTGRES_DB: chezhi
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: ci_ephemeral_only
+        ports:
+          - 5432/tcp
+        options: >-
+          --health-cmd "pg_isready -U postgres -d chezhi"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5
+        with:
+          go-version: '1.26.11'
+          cache: false
+      - name: Real database integration with race detector
+        env:
+          CHEZHI_TEST_DATABASE_URL: postgres://postgres:ci_ephemeral_only@127.0.0.1:${{ job.services.postgres.ports[5432] }}/chezhi?sslmode=disable
+        run: |
+          set -euo pipefail
+          mkdir -p bin
+          go test -race -run '^TestPostgres' -count=1 -v ./... | tee bin/postgres-test.txt
+      - name: Database commands, HTTP and native backup recovery
+        env:
+          CHEZHI_TEST_DATABASE_URL: postgres://postgres:ci_ephemeral_only@127.0.0.1:${{ job.services.postgres.ports[5432] }}/chezhi?sslmode=disable
+          CHEZHI_TEST_POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
+        run: |
+          set -euo pipefail
+          CGO_ENABLED=0 go build -trimpath -o bin/chezhi-license .
+          python3 migration/postgres_acceptance.py ./bin/chezhi-license | tee bin/postgres-acceptance.txt
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: postgres-acceptance
+          path: bin/postgres-*.txt
+          retention-days: 7
+          if-no-files-found: warn
+
+  standalone:
+    name: Standalone HTTPS server and container
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17.10-alpine@sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193
+        env:
+          POSTGRES_DB: chezhi
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: ci_ephemeral_only
+        ports:
+          - 5432/tcp
+        options: >-
+          --health-cmd "pg_isready -U postgres -d chezhi"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5
+        with:
+          go-version: '1.26.11'
+          cache: false
+      - name: Build shipping binary and container
+        run: |
+          set -euo pipefail
+          mkdir -p bin
+          CGO_ENABLED=0 go build -trimpath -o bin/chezhi-server .
+          docker build --tag chezhi-server:ci .
+      - name: Two-process TLS, proxy, shared state and native container smoke
+        env:
+          CHEZHI_TEST_DATABASE_URL: postgres://postgres:ci_ephemeral_only@127.0.0.1:${{ job.services.postgres.ports[5432] }}/chezhi?sslmode=disable
+          CHEZHI_TEST_POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
+          CHEZHI_TEST_CONTAINER_IMAGE: chezhi-server:ci
+          CHEZHI_TEST_CADDY_IMAGE: caddy:2.11.4-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
+        run: |
+          set -euo pipefail
+          python3 migration/server_acceptance.py ./bin/chezhi-server | tee bin/standalone-acceptance.txt
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: standalone-acceptance
+          path: bin/standalone-acceptance.txt
+          retention-days: 7
+          if-no-files-found: warn
+
+  dashboard-benchmark:
+    name: Dashboard benchmark and plan comparison
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17.10-alpine@sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193
+        env:
+          POSTGRES_DB: chezhi
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: ci_ephemeral_only
+        ports:
+          # The benchmark restarts PostgreSQL to clear shared buffers.
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d chezhi"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5
+        with:
+          go-version: '1.26.11'
+          cache: false
+      - name: Build audited baseline and proposed server on the same runner
+        run: |
+          set -euo pipefail
+          baseline=b89a21b4cb9c174e12e8d41f344ba59cd88fd81e
+          git fetch --no-tags --depth=1 origin "$baseline"
+          mkdir -p bin/performance "$RUNNER_TEMP/chezhi-audited"
+          git archive "$baseline" | tar -x -C "$RUNNER_TEMP/chezhi-audited"
+          CGO_ENABLED=0 go build -trimpath -o "$PWD/bin/performance/optimized" .
+          target="$PWD/bin/performance/audited"
+          (cd "$RUNNER_TEMP/chezhi-audited" && CGO_ENABLED=0 go build -trimpath -o "$target" .)
+      - name: Repeated identical HTTPS profiles and EXPLAIN ANALYZE BUFFERS
+        env:
+          CHEZHI_TEST_DATABASE_URL: postgres://postgres:ci_ephemeral_only@127.0.0.1:${{ job.services.postgres.ports[5432] }}/chezhi?sslmode=disable
+          CHEZHI_TEST_POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
+          CHEZHI_PERF_PROFILE: benchmark
+          CHEZHI_BENCHMARK_ONLY: '1'
+          CHEZHI_PERF_COLD_DB: '1'
+          CHEZHI_PLAN_DIR: bin/performance/plans
+          ENFORCE_TARGET: ${{ inputs.enforce_dashboard_slo }}
+        run: |
+          set -euo pipefail
+          CHEZHI_AUDITED_BASELINE=1 python3 migration/server_acceptance.py ./bin/performance/audited | tee bin/performance/audited.txt
+          enforce=0
+          if [ "$ENFORCE_TARGET" = true ]; then enforce=1; fi
+          CHEZHI_REQUIRE_PERF="$enforce" python3 migration/server_acceptance.py ./bin/performance/optimized | tee bin/performance/optimized.txt
+          echo "### HTTPS 500 ms target (median of three trial P95s)" >> "$GITHUB_STEP_SUMMARY"
+          grep -E '^(SLO|PERFORMANCE_500MS_TARGET)' bin/performance/optimized.txt >> "$GITHUB_STEP_SUMMARY"
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: dashboard-benchmark
+          path: |
+            bin/performance/*.txt
+            bin/performance/plans/*.json
+          retention-days: 14
+          if-no-files-found: warn
+) { throw 'CNG enrollment fixture failed' }
+          try {
+            & $exe reopen $slot $fingerprint
+            if ($LASTEXITCODE -ne 0) { throw 'CNG reopen fixture failed' }
+          } finally {
+            & $exe cleanup $slot $fingerprint
+            if ($LASTEXITCODE -ne 0) { throw 'CNG fixture cleanup failed' }
+          }
       - if: runner.os == 'Windows'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:

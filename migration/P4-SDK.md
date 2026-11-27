@@ -63,3 +63,42 @@ Tests: pure Go callback adapter/status tests; Windows c-shared build and
 .NET Framework P/Invoke smoke are CI gates. No claim of TPM, GUI or actual
 campus authorization test. Native successful online interop and full SDK
 application acceptance still required before shipping.
+
+## P4.2 CNG key lifecycle candidate
+
+Use Windows CNG via .NET Framework CngKey/ECDsaCng, with the Microsoft
+Software Key Storage Provider or the Microsoft Platform Crypto Provider
+(selected explicitly, TPM required). No automatic provider fallback.
+References: https://learn.microsoft.com/en-us/windows/win32/seccertenroll/cng-key-storage-providers
+and https://learn.microsoft.com/en-us/dotnet/api/system.security.cryptography.cngkeycreationparameters .
+
+A random nonempty enrollment GUID determines a namespaced current-user
+persistent key name. Enrollment is an explicit create-only operation
+without overwrite. Opening is a separate operation requiring the previously
+pinned SHA-256 fingerprint of the SEC1 public point, and verifies provider,
+user scope, persisted key name, algorithm, size, signing-only use and
+nonexport policy. Missing key, malformed metadata, mismatch or provider
+failure never generates a replacement. The only private operation is
+signing a SHA-256 digest; the P3/SDK boundary verifies the signature and
+normalizes its encoding. No private key export is part of the application
+interface. Disposal releases handles, not the persisted key.
+
+The enrollment coordinator (next increment) must persist its intent before
+creation, pin the returned fingerprint before first server activation,
+use atomic protected metadata, and refuse unattended repair or fallback
+after interrupted enrollment. The current provider class does not implement
+that persistent metadata transaction. The caller chooses the provider;
+a successful TPM-provider call is not remote attestation. Software KSP
+nonexport policy does not imply protection against an administrator or
+malicious code running as the same user. TPM hardware, cross-user ACL
+and key-loss recovery are not yet accepted. DeviceKeySmoke exercises
+software keys in two independent Windows processes with a random fixture
+name, checks signatures, nonexport, duplicate/missing/fingerprint/provider
+mismatch, callback failure zeroing, and explicit fixture cleanup.
+Do not report TPM success from the software-KSP CI fixture.
+
+P4.1 run 46004757745: 8/10; Windows DLL build and Go tests succeeded,
+.NET Framework csc relative-path compile failed (absolute path fix in
+this increment); PostgreSQL SDK integration passed. Benchmark failed on
+mixed workload with no successful issue, so the P5 capacity gate remains
+open and its assertions are unchanged.
