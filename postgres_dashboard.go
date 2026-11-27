@@ -239,6 +239,7 @@ func (p *postgresStore) readServerExport(ctx context.Context, archive bool) (Sta
 		}
 		var err error
 		if archive {
+			if err := denySecureLegacyBackup(ctx, tx); err != nil { return err }
 			state, err = readState(ctx, tx, true)
 			if err != nil {
 				return err
