@@ -345,6 +345,33 @@ func TestPostgresSessionsAndReconnect(t *testing.T) {
 	if call(peer, "GET", "/?view=issue", nil, member).Code != 403 {
 		t.Fatal("updated role not enforced")
 	}
+	// An admin mutation authorized before the role change must fail at commit.
+	stale := context.WithValue(ctx, accountRevisionKey{}, int64(1))
+	if keys, err := s.issueContext(stale, 1, 1, 0, "test", "stale-role", "operator1"); !errors.Is(err, errAccountChanged) || len(keys) != 0 {
+		t.Fatal("stale authorization committed an order", err)
+	}
+	peerOwner := login(peer, "admin", "bootstrap-peer")
+	rotated := "synthetic rotated password 42"
+	form := url.Values{"csrf": {g.sessions[owner.Value].csrf}, "current_password": {"bootstrap"},
+		"new_password": {rotated}, "confirm_password": {rotated}}
+	if call(g, "POST", "/account/password", form, owner).Code != 303 ||
+		call(peer, "GET", "/?view=account", nil, peerOwner).Code != 303 {
+		t.Fatal("owner rotation did not invalidate prior sessions")
+	}
+	newOwner := login(peer, "admin", rotated)
+	if call(peer, "GET", "/?view=account", nil, newOwner).Code != 200 {
+		t.Fatal("rotated credential unavailable on peer")
+	}
+	audit := pgSnapshot(t, s).Audit
+	var changed int
+	for _, entry := range audit {
+		if entry.Action == "password_changed" && entry.Actor == "admin" {
+			changed++
+		}
+	}
+	if changed != 1 {
+		t.Fatal("owner rotation audit missing or duplicated")
+	}
 	// Terminate a connection with an in-flight write and verify rollback and recovery.
 	conn, err := s.pg.db.Conn(ctx)
 	if err != nil {

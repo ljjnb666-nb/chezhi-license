@@ -19,7 +19,9 @@ $env:CHEZHI_STORAGE = 'postgres'
 ```
 
 The example uses a generated password and a dedicated disposable local
-database. Compose accepts environment variables or a private `.env`;
+database. Build distributable Windows and Linux binaries with a patched Go
+1.26 toolchain (at least 1.26.11 for this release). The Go 1.23 CI job
+checks source compatibility. Compose accepts environment variables or a private `.env`;
 the Go process reads environment variables from its caller. For PostgreSQL
 mode, the service verifies the schema at startup and exits on a missing
 connection string, unavailable database or unsupported schema. It listens on
