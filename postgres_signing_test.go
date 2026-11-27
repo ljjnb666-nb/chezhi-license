@@ -146,4 +146,9 @@ func TestPostgresSigningPolicyV2(t *testing.T) {
 	if _,err:=peer.configureSigner(ctx);err==nil{t.Fatal("old private key accepted after rotation")}
 	rotated,err:=readSigningPolicy(ctx,peer.db)
 	if err!=nil || rotated.scope==signer.policy.scope{t.Fatal("rotation scope not replaced",err)}
+	rotatedID:=sha256.Sum256(newPub)
+	if err:=peer.setSigningPolicy(ctx,name,fmt.Sprintf("%x",rotatedID),publicHex);err==nil{t.Fatal("retired key reused")}
+	var events int
+	if err:=peer.db.QueryRow("SELECT count(*) FROM chezhi_signing_history").Scan(&events);err!=nil || events!=2{t.Fatal("rotation history",events,err)}
+	if err:=peer.verifyDatabase(ctx,"--migrator");err!=nil{t.Fatal("history deep check",err)}
 }

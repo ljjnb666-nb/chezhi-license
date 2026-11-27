@@ -37,7 +37,10 @@ var postgresV7 string
 //go:embed postgres_v8.sql
 var postgresV8 string
 
-var postgresMigrations = []string{postgresV1, postgresV2, postgresV3, postgresV4, postgresV5, postgresV6, postgresV7, postgresV8}
+//go:embed postgres_v9.sql
+var postgresV9 string
+
+var postgresMigrations = []string{postgresV1, postgresV2, postgresV3, postgresV4, postgresV5, postgresV6, postgresV7, postgresV8, postgresV9}
 
 var errCommitUnknown = errors.New("database commit result unknown")
 

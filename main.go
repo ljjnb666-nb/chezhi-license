@@ -317,7 +317,7 @@ func run(ctx context.Context, args []string) error {
 		case "license-key-generate":
 			if len(args) != 2 { return errors.New("usage: license-key-generate <new-protected-file>") }
 			return generateSigningKey(args[1])
-		case "db-init", "db-check", "db-import", "db-owner-init", "db-set-mode", "db-recover-security", "db-set-signing-key":
+		case "db-init", "db-check", "db-import", "db-owner-init", "db-set-mode", "db-recover-security", "db-set-signing-key", "db-signing-info":
 			return databaseCommand(ctx, args)
 		}
 	}

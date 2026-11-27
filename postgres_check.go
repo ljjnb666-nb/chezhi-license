@@ -30,6 +30,9 @@ var postgresCatalogV7 string
 //go:embed postgres_catalog_v8.json
 var postgresCatalogV8 string
 
+//go:embed postgres_catalog_v9.json
+var postgresCatalogV9 string
+
 func verifyPostgresCatalog(ctx context.Context, tx *sql.Tx) error {
 	var manifest string
 	if err := tx.QueryRowContext(ctx, postgresCatalogSQL).Scan(&manifest); err != nil {
@@ -51,6 +54,9 @@ func verifyPostgresCatalog(ctx context.Context, tx *sql.Tx) error {
 	var signing map[string]string
 	if json.Unmarshal([]byte(postgresCatalogV8), &signing) != nil { return errors.New("invalid V8 catalog manifest") }
 	for key, definition := range signing { expected[key] = definition }
+	var signingHistory map[string]string
+	if json.Unmarshal([]byte(postgresCatalogV9), &signingHistory) != nil { return errors.New("invalid V9 catalog manifest") }
+	for key, definition := range signingHistory { expected[key] = definition }
 	var mismatches []string
 	for key, definition := range expected {
 		if actual[key] != definition {
@@ -152,7 +158,7 @@ func verifyPostgresData(ctx context.Context, tx *sql.Tx, includeImport bool) err
 		return err
 	}
 	if err := verifySecureBindings(ctx, tx); err != nil { return err }
-	if _, err := readSigningPolicy(ctx, tx); err != nil { return err }
+	if err := verifySigningHistory(ctx, tx); err != nil { return err }
 	if includeImport {
 		var valid bool
 		if err := tx.QueryRowContext(ctx, `SELECT NOT EXISTS (SELECT 1 FROM chezhi_import
@@ -173,7 +179,7 @@ func verifyMigratorRole(ctx context.Context, tx *sql.Tx) error {
       AND NOT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
         WHERE n.nspname='public' AND relname IN
         ('chezhi_schema','chezhi_config','chezhi_orders','chezhi_cards','chezhi_audit','chezhi_plans',
-         'chezhi_members','chezhi_owner','chezhi_import','chezhi_sessions','chezhi_rate_limits','chezhi_deployment','chezhi_challenges','chezhi_secure_bindings','chezhi_signing_policy','chezhi_cards_position_seq','chezhi_audit_position_seq')
+         'chezhi_members','chezhi_owner','chezhi_import','chezhi_sessions','chezhi_rate_limits','chezhi_deployment','chezhi_challenges','chezhi_secure_bindings','chezhi_signing_policy','chezhi_signing_history','chezhi_cards_position_seq','chezhi_audit_position_seq')
         AND NOT pg_has_role(current_user,c.relowner,'USAGE'))
       AND EXISTS (SELECT 1 FROM pg_type t JOIN pg_namespace n ON n.oid=t.typnamespace
         WHERE n.nspname='public' AND t.typname='chezhi_instant' AND pg_has_role(current_user,t.typowner,'USAGE'))`).Scan(&ok); err != nil {
@@ -195,7 +201,7 @@ func verifyRuntimeRole(ctx context.Context, tx *sql.Tx) error {
         AND NOT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
             WHERE n.nspname='public' AND c.relname IN
             ('chezhi_schema','chezhi_config','chezhi_orders','chezhi_cards','chezhi_audit','chezhi_plans',
-             'chezhi_members','chezhi_owner','chezhi_import','chezhi_sessions','chezhi_rate_limits','chezhi_deployment','chezhi_challenges','chezhi_secure_bindings','chezhi_signing_policy','chezhi_cards_position_seq','chezhi_audit_position_seq')
+             'chezhi_members','chezhi_owner','chezhi_import','chezhi_sessions','chezhi_rate_limits','chezhi_deployment','chezhi_challenges','chezhi_secure_bindings','chezhi_signing_policy','chezhi_signing_history','chezhi_cards_position_seq','chezhi_audit_position_seq')
             AND pg_has_role(current_user,c.relowner,'USAGE'))
         FROM pg_roles WHERE rolname=current_user`).Scan(&limited); err != nil {
 		return errDatabase
@@ -220,7 +226,8 @@ func verifyRuntimeRole(ctx context.Context, tx *sql.Tx) error {
             ('chezhi_deployment', true, false, false, ARRAY[]::text[]),
             ('chezhi_challenges', true, true, true, ARRAY[]::text[]),
             ('chezhi_secure_bindings', true, true, false, ARRAY['public_key','revision']),
-            ('chezhi_signing_policy', true, false, false, ARRAY[]::text[])
+            ('chezhi_signing_policy', true, false, false, ARRAY[]::text[]),
+            ('chezhi_signing_history', true, false, false, ARRAY[]::text[])
         )
         SELECT NOT EXISTS (
             SELECT 1 FROM expected e, LATERAL (SELECT to_regclass('public.' || e.rel) AS oid) c

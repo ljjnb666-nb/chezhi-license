@@ -10,8 +10,11 @@
 !postgres_catalog_v6.json
 !postgres_catalog_v7.json
 !postgres_catalog_v8.json
+!postgres_catalog_v9.json
 !internal/
 !internal/license/
 !internal/license/*.go
 !internal/proof/
 !internal/proof/*.go
+!internal/licenseclient/
+!internal/licenseclient/*.go

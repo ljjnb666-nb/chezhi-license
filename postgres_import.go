@@ -268,6 +268,9 @@ func databaseCommand(ctx context.Context, args []string) error {
 	}
 	defer p.db.Close()
 	switch command {
+	case "db-signing-info":
+		if err = p.checkSchema(ctx); err != nil { return err }
+		err = p.printSigningInfo(ctx)
 	case "db-set-signing-key":
 		if err = p.checkSchema(ctx); err != nil { return err }
 		err = p.setSigningPolicy(ctx,args[1],args[2],args[3])

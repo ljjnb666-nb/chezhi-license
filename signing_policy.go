@@ -9,6 +9,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
+	"strings"
 	"os"
 	"runtime"
 
@@ -65,12 +67,16 @@ func generateSigningKey(path string) error {
 
 func loadSigningKey() (ed25519.PrivateKey,error) {
 	path:=os.Getenv("CHEZHI_SIGNING_KEY_FILE")
-	stat,err:=os.Stat(path)
+	f,err:=os.Open(path)
+	if err!=nil { return nil,errors.New("cannot open signing key file") }
+	defer f.Close()
+	stat,err:=f.Stat()
 	if err!=nil || !stat.Mode().IsRegular() || (runtime.GOOS!="windows" && stat.Mode().Perm()&0077!=0) {
 		return nil,errors.New("signing key must be a protected regular file")
 	}
-	raw,err:=readProtectedInput("CHEZHI_SIGNING_KEY_FILE",66)
-	if err!=nil { return nil,err }
+	bytes,err:=io.ReadAll(io.LimitReader(f,67))
+	if err!=nil || len(bytes)>66 { return nil,errors.New("invalid signing key file") }
+	raw:=strings.TrimSuffix(strings.TrimSuffix(string(bytes),"\n"),"\r")
 	seed,err:=hex.DecodeString(raw)
 	if err!=nil || len(seed)!=ed25519.SeedSize || raw!=hex.EncodeToString(seed) {
 		return nil,errors.New("invalid signing key seed")
@@ -113,8 +119,14 @@ func (p *postgresStore) setSigningPolicy(ctx context.Context,name,expected,publi
 		if err:=verifyMigratorRole(ctx,tx);err!=nil { return err }
 		_,bound,err:=deploymentState(ctx,tx)
 		if err!=nil || !bound { return errDeployment }
+		if err:=verifySigningHistory(ctx,tx);err!=nil { return err }
 		old,err:=readSigningPolicy(ctx,tx)
 		if err!=nil { return err }
+		var reused bool
+		if tx.QueryRowContext(ctx,"SELECT EXISTS(SELECT FROM chezhi_signing_history WHERE public_key=$1)",publicHex).Scan(&reused)!=nil { return errDatabase }
+		if reused { return errors.New("signing key has already been used") }
+		action:="initialize"
+		if old!=nil { action="rotate" }
 		if old==nil {
 			if expected!="none" { return errors.New("expected signing policy does not match") }
 		} else {
@@ -125,13 +137,50 @@ func (p *postgresStore) setSigningPolicy(ctx context.Context,name,expected,publi
 		if err!=nil { return err }
 		if err:=dbExec(ctx,tx,`INSERT INTO chezhi_signing_policy(singleton,deployment,public_key)
 			VALUES(true,$1,$2) ON CONFLICT(singleton) DO UPDATE SET deployment=excluded.deployment,public_key=excluded.public_key`,scope,publicHex);err!=nil { return err }
+		if err:=dbExec(ctx,tx,"INSERT INTO chezhi_signing_history(deployment,public_key,action) VALUES($1,$2,$3)",scope,publicHex,action);err!=nil { return err }
 		if err:=dbExec(ctx,tx,"DELETE FROM chezhi_challenges");err!=nil { return err }
 		return dbExec(ctx,tx,"UPDATE chezhi_deployment SET generation=generation+1 WHERE singleton")
 	})
 }
 
 func refreshSigningScope(ctx context.Context,tx *sql.Tx) error {
+	if err:=verifySigningHistory(ctx,tx);err!=nil { return err }
+	policy,err:=readSigningPolicy(ctx,tx)
+	if err!=nil || policy==nil { return err }
 	scope,err:=freshSigningScope()
 	if err!=nil { return err }
-	return dbExec(ctx,tx,"UPDATE chezhi_signing_policy SET deployment=$1 WHERE singleton",scope)
+	if err:=dbExec(ctx,tx,"UPDATE chezhi_signing_policy SET deployment=$1 WHERE singleton",scope);err!=nil { return err }
+	return dbExec(ctx,tx,"INSERT INTO chezhi_signing_history(deployment,public_key,action) VALUES($1,$2,'recovery')",scope,hex.EncodeToString(policy.public))
+}
+
+func verifySigningHistory(ctx context.Context,tx *sql.Tx) error {
+	policy,err:=readSigningPolicy(ctx,tx)
+	if err!=nil { return err }
+	var historyOK bool
+	if policy==nil {
+		if tx.QueryRowContext(ctx,"SELECT NOT EXISTS(SELECT FROM chezhi_signing_history)").Scan(&historyOK)!=nil || !historyOK { return errDatabase }
+		return nil
+	}
+	if tx.QueryRowContext(ctx,`SELECT EXISTS(SELECT FROM chezhi_signing_history WHERE deployment=$1 AND public_key=$2)
+		AND NOT EXISTS(SELECT FROM chezhi_signing_history WHERE NOT isfinite(recorded_at)
+		OR deployment=repeat('0',64) OR public_key=repeat('0',64))`,hex.EncodeToString(policy.scope.Deployment[:]),hex.EncodeToString(policy.public)).Scan(&historyOK)!=nil || !historyOK {
+		return errDatabase
+	}
+	return nil
+}
+
+func (p *postgresStore) printSigningInfo(ctx context.Context) error {
+	var policy *signingPolicy
+	err:=p.transaction(ctx,&sql.TxOptions{ReadOnly:true,Isolation:sql.LevelRepeatableRead},func(ctx context.Context,tx *sql.Tx)error{
+		_,matched,err:=deploymentState(ctx,tx)
+		if err!=nil || !matched { return errDeployment }
+		if err:=verifySigningHistory(ctx,tx);err!=nil { return err }
+		policy,err=readSigningPolicy(ctx,tx)
+		return err
+	})
+	if err!=nil { return err }
+	if policy==nil { return errors.New("signing policy is not configured") }
+	id:=sha256.Sum256(policy.public)
+	fmt.Printf("Product: %s\nDeployment: %x\nPublic key: %x\nKey ID: %x\n",policy.scope.Product,policy.scope.Deployment,policy.public,id)
+	return nil
 }
