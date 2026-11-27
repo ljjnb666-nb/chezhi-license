@@ -2,7 +2,7 @@ WITH app_tables AS (
     SELECT c.* FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
     WHERE n.nspname='public' AND c.relname IN
         ('chezhi_schema','chezhi_config','chezhi_orders','chezhi_cards','chezhi_audit',
-         'chezhi_plans','chezhi_members','chezhi_owner','chezhi_import','chezhi_sessions','chezhi_rate_limits','chezhi_deployment','chezhi_challenges','chezhi_secure_bindings')
+         'chezhi_plans','chezhi_members','chezhi_owner','chezhi_import','chezhi_sessions','chezhi_rate_limits','chezhi_deployment','chezhi_challenges','chezhi_secure_bindings','chezhi_signing_policy')
 ), manifest AS (
     SELECT 'table/' || t.relname AS key,
         jsonb_build_array(t.relkind, t.relpersistence, t.relrowsecurity)::text AS definition
