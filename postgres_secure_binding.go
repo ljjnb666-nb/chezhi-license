@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"errors"
+	"time"
 
 	"chezhi.local/licenseprototype/internal/proof"
 )
@@ -59,10 +60,11 @@ func lockSecureCard(ctx context.Context, tx *sql.Tx, cardHash proof.Digest, publ
 		return Card{}, 0, errSecureBinding
 	}
 	c := cards[0]
-	now, err := databaseProofTime(ctx, tx)
-	if err != nil {
-		return Card{}, 0, err
+	var now time.Time
+	if err := tx.QueryRowContext(ctx, "SELECT clock_timestamp()").Scan(&now); err != nil {
+		return Card{}, 0, errDatabase
 	}
+	now = now.UTC()
 	if c.Revoked || (c.Expires != nil && !now.Before(*c.Expires)) {
 		return Card{}, 0, errSecureBinding
 	}
