@@ -209,6 +209,9 @@ func (s *Store) checkLicense(ctx context.Context, raw, device string, bind bool)
 		result.Reason = "not_found"
 		return nil
 	})
+	if errors.Is(err, errSecureProtocolRequired) {
+		return license.ValidationResult{Reason: "secure_protocol_required"}, nil
+	}
 	if err != nil {
 		return license.ValidationResult{}, err
 	}
