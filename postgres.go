@@ -19,7 +19,10 @@ var postgresV1 string
 //go:embed postgres_v2.sql
 var postgresV2 string
 
-var postgresMigrations = []string{postgresV1, postgresV2}
+//go:embed postgres_v3.sql
+var postgresV3 string
+
+var postgresMigrations = []string{postgresV1, postgresV2, postgresV3}
 
 var errCommitUnknown = errors.New("database commit result unknown")
 
@@ -249,17 +252,38 @@ func lockAccountRevision(ctx context.Context, tx *sql.Tx, exclusive bool) (int64
 	if expected, ok := ctx.Value(accountRevisionKey{}).(int64); ok && expected != actual {
 		return 0, errAccountChanged
 	}
+	if digest, ok := ctx.Value(sharedSessionKey{}).(string); ok {
+		var active bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS (
+            SELECT FROM chezhi_sessions WHERE token_digest=$1 AND expires>clock_timestamp()
+        )`, digest).Scan(&active); err != nil {
+			return 0, errDatabase
+		}
+		if !active {
+			return 0, errSessionInvalid
+		}
+	}
 	return actual, nil
 }
 
 type mutationScope struct {
-	order   string
-	hash    string
-	ids     []string
-	support bool
+	order    string
+	hash     string
+	ids      []string
+	support  bool
+	readOnly bool
 }
 
 func (p *postgresStore) mutate(ctx context.Context, scope mutationScope, apply func(*State) error) error {
+	if scope.readOnly {
+		return p.transaction(ctx, &sql.TxOptions{ReadOnly: true}, func(ctx context.Context, tx *sql.Tx) error {
+			cards, err := queryCards(ctx, tx, " WHERE c.hash=$1", scope.hash)
+			if err != nil {
+				return err
+			}
+			return apply(&State{Cards: cards})
+		})
+	}
 	return p.transaction(ctx, nil, func(ctx context.Context, tx *sql.Tx) error {
 		if _, ok := ctx.Value(accountRevisionKey{}).(int64); ok {
 			if _, err := lockAccountRevision(ctx, tx, scope.support); err != nil {
@@ -340,26 +364,32 @@ func readState(ctx context.Context, tx *sql.Tx, full bool) (State, error) {
 	if state.Cards, err = queryCards(ctx, tx, " ORDER BY c.position"); err != nil {
 		return state, err
 	}
-	rows, err := tx.QueryContext(ctx, "SELECT occurred,action,coalesce(card_id,''),actor,target FROM chezhi_audit ORDER BY position")
+	state.Audit, err = queryAudit(ctx, tx, " ORDER BY position")
+	return state, err
+}
+
+func queryAudit(ctx context.Context, tx *sql.Tx, suffix string, args ...any) ([]Audit, error) {
+	var audit []Audit
+	rows, err := tx.QueryContext(ctx, "SELECT occurred,action,coalesce(card_id,''),actor,target FROM chezhi_audit"+suffix, args...)
 	if err != nil {
-		return state, errDatabase
+		return nil, errDatabase
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var occurred string
 		var a Audit
 		if err := rows.Scan(&occurred, &a.Action, &a.CardID, &a.Actor, &a.Target); err != nil {
-			return state, errDatabase
+			return nil, errDatabase
 		}
 		if a.At, err = parseSQLTime(occurred); err != nil {
-			return state, err
+			return nil, err
 		}
-		state.Audit = append(state.Audit, a)
+		audit = append(audit, a)
 	}
 	if rows.Err() != nil {
-		return state, errDatabase
+		return nil, errDatabase
 	}
-	return state, nil
+	return audit, nil
 }
 func readPlans(ctx context.Context, tx *sql.Tx) ([]Plan, error) {
 	rows, err := tx.QueryContext(ctx, "SELECT days,cents,visible FROM chezhi_plans ORDER BY CASE WHEN days=0 THEN 366 ELSE days END")
@@ -471,6 +501,13 @@ func (p *postgresStore) changeAccount(ctx context.Context, a Audit, write func(c
 		}
 		revision = previous + 1
 		if err := write(ctx, tx, revision); err != nil {
+			return err
+		}
+		name := a.Target
+		if name == "" {
+			name = a.Actor
+		}
+		if err := dbExec(ctx, tx, "DELETE FROM chezhi_sessions WHERE principal=$1", name); err != nil {
 			return err
 		}
 		if err := dbExec(ctx, tx, "UPDATE chezhi_config SET accounts_revision=$1 WHERE singleton", revision); err != nil {

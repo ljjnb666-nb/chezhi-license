@@ -132,7 +132,7 @@ fractional digits to preserve legacy nanoseconds. SQL foreign keys and checks
 enforce order, card, binding and term relationships. Plan prices are stored
 in integer cents and operate independently of issued cards.
 
-## Transactions and sessions
+## Transactions and local-mode sessions
 
 Issuance inserts the unique order, all cards and all corresponding audit
 rows in one transaction. Validation locks the matching card. Batch mutations
@@ -195,7 +195,7 @@ and data reconciliation results against the source backup baseline, and reapply
 the runtime grants. A structurally valid smaller dataset can pass a standalone
 integrity check, so baseline comparison is required for completeness. Run
 `db-check --runtime`, then test login and device authorization on the isolated
-restored service before switching. A backup
+restored service before switching. For standalone deployments, clear the ephemeral session and rate tables before opening a restored database to traffic. See the standalone runbook. A backup
 has a point-in-time recovery boundary. After PostgreSQL accepts writes, recover
 forward on PostgreSQL. Pause writers, preserve the latest accessible database or
 logs, and reconcile any later writes before promoting a restored copy. The

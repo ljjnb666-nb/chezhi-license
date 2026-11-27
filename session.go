@@ -2,11 +2,10 @@ package main
 
 import (
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
 	"crypto/subtle"
 	_ "embed"
 	"encoding/hex"
+	"errors"
 	"html/template"
 	"net/http"
 	"strings"
@@ -64,9 +63,7 @@ func (g *adminGateway) refreshAccounts(ctx context.Context) error {
 	return nil
 }
 func (g *adminGateway) loginToken() string {
-	h := hmac.New(sha256.New, []byte(g.w.csrf))
-	h.Write([]byte("admin-login-v1"))
-	return hex.EncodeToString(h.Sum(nil))
+	return keyedDigest(g.w.csrf, "admin-login-v1")
 }
 func (g *adminGateway) renderLogin(rw http.ResponseWriter, status int, msg string) {
 	rw.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -131,14 +128,21 @@ func (g *adminGateway) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 		http.Error(rw, "invalid host", 400)
 		return
 	}
+	if strings.HasPrefix(r.URL.Path, "/api/v1/") || r.URL.Path == "/api/v1" {
+		g.w.ServeHTTP(rw, r)
+		return
+	}
 	switch r.URL.Path {
 	case "/activate", "/purchase", "/api/demo/activate":
 		g.w.ServeHTTP(rw, r)
 		return
 	}
-	// Serialize admin request authorization and mutation with role/session changes.
-	g.dispatch.Lock()
-	defer g.dispatch.Unlock()
+	settings, shared := r.Context().Value(serverRequestKey{}).(serverRequest)
+	if !shared {
+		// Local account configuration and sessions are process-owned.
+		g.dispatch.Lock()
+		defer g.dispatch.Unlock()
+	}
 	if g.w.s.pg != nil {
 		if err := g.refreshAccounts(r.Context()); err != nil {
 			http.Error(rw, "账户配置无法读取", 503)
@@ -146,7 +150,27 @@ func (g *adminGateway) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 		}
 		r = r.WithContext(context.WithValue(r.Context(), accountRevisionKey{}, g.accountRevision))
 	}
-	id, s, ok := g.session(r)
+	var id string
+	var s adminSession
+	var ok bool
+	if shared {
+		if cookie, err := r.Cookie(sessionCookieFor(r, "", 0).Name); err == nil && len(cookie.Value) == 64 {
+			if decoded, err := hex.DecodeString(cookie.Value); err == nil && len(decoded) == 32 {
+				var lookupErr error
+				s, lookupErr = g.w.s.pg.sharedSession(r.Context(), cookie.Value)
+				if lookupErr != nil && !errors.Is(lookupErr, errSessionInvalid) {
+					http.Error(rw, "service unavailable", 503)
+					return
+				}
+				if lookupErr == nil && s.revision == g.revisions[s.name] {
+					id, ok = cookie.Value, true
+					r = r.WithContext(context.WithValue(r.Context(), sharedSessionKey{}, digestSecret(id)))
+				}
+			}
+		}
+	} else {
+		id, s, ok = g.session(r)
+	}
 	if r.URL.Path == "/login" {
 		if r.Method == http.MethodGet {
 			if ok {
@@ -166,7 +190,18 @@ func (g *adminGateway) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 			http.Error(rw, "请求无效，请重新打开登录页", 403)
 			return
 		}
-		if !g.budget() {
+		allowed := false
+		if shared {
+			var err error
+			allowed, err = g.w.s.pg.allowShared(r.Context(), "login", settings.source, 60, settings.config.loginRate)
+			if err != nil {
+				g.renderLogin(rw, 503, "授权服务暂不可用")
+				return
+			}
+		} else {
+			allowed = g.budget()
+		}
+		if !allowed {
 			rw.Header().Set("Retry-After", "60")
 			g.renderLogin(rw, 429, "尝试次数过多，请稍后再试。")
 			return
@@ -179,6 +214,19 @@ func (g *adminGateway) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 			return
 		}
 		sid := randomToken()
+		if shared {
+			err := g.w.s.pg.createSharedSession(r.Context(), id, sid, name, role, g.revisions[name])
+			switch {
+			case errors.Is(err, errSessionCapacity):
+				g.renderLogin(rw, 429, "会话数量已达上限，请退出其他会话。")
+			case err != nil:
+				g.renderLogin(rw, 503, "会话暂不可用")
+			default:
+				http.SetCookie(rw, sessionCookieFor(r, sid, 28800))
+				http.Redirect(rw, r, "/", 303)
+			}
+			return
+		}
 		now := g.now()
 		g.mu.Lock()
 		g.pruneSessions(now)
@@ -204,7 +252,7 @@ func (g *adminGateway) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 		}
 		g.sessions[sid] = adminSession{expiry: now.Add(8 * time.Hour), csrf: randomToken(), name: name, role: role, revision: g.revisions[name]}
 		g.mu.Unlock()
-		http.SetCookie(rw, &http.Cookie{Name: sessionCookie, Value: sid, Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, MaxAge: 28800})
+		http.SetCookie(rw, sessionCookieFor(r, sid, 28800))
 		http.Redirect(rw, r, "/", 303)
 		return
 	}
@@ -217,6 +265,15 @@ func (g *adminGateway) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 		r.Body = http.MaxBytesReader(rw, r.Body, 4096)
 		if !ok || parseScalarForm(r) != nil || !g.w.originOK(r) || subtle.ConstantTimeCompare([]byte(r.PostForm.Get("logout_csrf")), []byte(s.csrf)) != 1 {
 			http.Error(rw, "请求无效", 403)
+			return
+		}
+		if shared {
+			if err := g.w.s.pg.revokeSharedSession(r.Context(), id, s.name, r.URL.Path == "/logout-all"); err != nil {
+				http.Error(rw, "service unavailable", 503)
+				return
+			}
+			http.SetCookie(rw, sessionCookieFor(r, "", -1))
+			http.Redirect(rw, r, "/login", 303)
 			return
 		}
 		g.mu.Lock()
@@ -235,7 +292,7 @@ func (g *adminGateway) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 			action = "logout_all"
 		}
 		g.securityAuditContext(r.Context(), s.name, action)
-		http.SetCookie(rw, &http.Cookie{Name: sessionCookie, Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, MaxAge: -1})
+		http.SetCookie(rw, sessionCookieFor(r, "", -1))
 		http.Redirect(rw, r, "/login", 303)
 		return
 	}
@@ -256,12 +313,11 @@ func (g *adminGateway) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 			return
 		}
 		rr := withPrincipal(r.Clone(r.Context()), p)
-		rr.SetBasicAuth("admin", w.token)
 		w.ServeHTTP(rw, rr)
 		return
 	}
 	// Preserve explicit non-browser automation compatibility. Never prompt browsers for Basic Auth.
-	if g.owner == nil && r.Header.Get("Authorization") != "" && r.Header.Get("Sec-Fetch-Site") == "" && !strings.Contains(r.Header.Get("Accept"), "text/html") {
+	if !shared && g.owner == nil && r.Header.Get("Authorization") != "" && r.Header.Get("Sec-Fetch-Site") == "" && !strings.Contains(r.Header.Get("Accept"), "text/html") {
 		u, p, valid := r.BasicAuth()
 		if !valid || u != "admin" || subtle.ConstantTimeCompare([]byte(p), []byte(g.w.token)) != 1 {
 			if !g.budget() {

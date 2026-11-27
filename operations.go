@@ -33,7 +33,7 @@ type Operations struct {
 }
 
 // Read-only projections of the existing authoritative card records; no new state.
-func buildOperations(s State, now time.Time, section string, q url.Values) Operations {
+func operationsFilters(q url.Values) Operations {
 	o := Operations{Q: strings.TrimSpace(q.Get("oq")), Channel: q.Get("oc"), State: q.Get("ds")}
 	if len(o.Q) > 80 {
 		o.Q = ""
@@ -44,13 +44,41 @@ func buildOperations(s State, now time.Time, section string, q url.Values) Opera
 	if o.State != "已激活" && o.State != "已过期" && o.State != "已吊销" {
 		o.State = ""
 	}
+	return o
+}
+
+func emptyTrend(now time.Time) []TrendDay {
+	days := make([]TrendDay, 0, 7)
+	for i := 0; i < 7; i++ {
+		days = append(days, TrendDay{Label: now.In(beijing).AddDate(0, 0, i-6).Format("01/02")})
+	}
+	return days
+}
+
+func (o *Operations) scaleTrend() {
+	peak := 0
+	for _, row := range o.Trend {
+		peak = max(peak, row.Cards)
+	}
+	if peak == 0 {
+		return
+	}
+	for i := range o.Trend {
+		if o.Trend[i].Cards > 0 {
+			o.Trend[i].Height = max(5, 100*o.Trend[i].Cards/peak)
+		}
+	}
+}
+
+func buildOperations(s State, now time.Time, section string, q url.Values) Operations {
+	o := operationsFilters(q)
+	o.Trend = emptyTrend(now)
 	match := func(v string) bool { return strings.Contains(strings.ToLower(v), strings.ToLower(o.Q)) }
 	days := map[string]int{}
 	dayOrders := make([]map[string]bool, 7)
 	for i := 0; i < 7; i++ {
 		d := now.In(beijing).AddDate(0, 0, i-6)
 		days[d.Format("2006-01-02")] = i
-		o.Trend = append(o.Trend, TrendDay{Label: d.Format("01/02")})
 		dayOrders[i] = map[string]bool{}
 	}
 	orderIndex := map[string]int{}
@@ -82,18 +110,10 @@ func buildOperations(s State, now time.Time, section string, q url.Values) Opera
 			o.Devices = append(o.Devices, DeviceRow{Card: c, State: cardStatus(c, now)})
 		}
 	}
-	peak := 0
 	for i := range o.Trend {
 		o.Trend[i].Orders = len(dayOrders[i])
-		peak = max(peak, o.Trend[i].Cards)
 	}
-	if peak > 0 {
-		for i := range o.Trend {
-			if o.Trend[i].Cards > 0 {
-				o.Trend[i].Height = max(5, 100*o.Trend[i].Cards/peak)
-			}
-		}
-	}
+	o.scaleTrend()
 	if section == "orders" {
 		o.Count = len(o.Orders)
 	} else if section == "devices" {
@@ -109,6 +129,11 @@ func buildOperations(s State, now time.Time, section string, q url.Values) Opera
 	} else {
 		o.Devices = o.Devices[start:end]
 	}
+	o.addLinks(section)
+	return o
+}
+
+func (o *Operations) addLinks(section string) {
 	link := func(n int) string {
 		return "/?" + url.Values{"view": {section}, "oq": {o.Q}, "oc": {o.Channel}, "ds": {o.State}, "op": {strconv.Itoa(n)}}.Encode()
 	}
@@ -118,5 +143,4 @@ func buildOperations(s State, now time.Time, section string, q url.Values) Opera
 	if o.Page < o.Pages {
 		o.Next = link(o.Page + 1)
 	}
-	return o
 }

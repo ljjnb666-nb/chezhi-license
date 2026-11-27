@@ -248,12 +248,25 @@ func databaseCommand(ctx context.Context, args []string) error {
 	} else if len(args) != 1 {
 		return errors.New("unexpected database command arguments")
 	}
-	p, err := openPostgres(ctx, os.Getenv("CHEZHI_DATABASE_URL"))
+	dsn, err := configuredDatabaseURL()
+	if err != nil {
+		return err
+	}
+	p, err := openPostgres(ctx, dsn)
 	if err != nil {
 		return err
 	}
 	defer p.db.Close()
 	switch command {
+	case "db-owner-init":
+		if err = p.checkSchema(ctx); err != nil {
+			return err
+		}
+		var password string
+		password, err = readProtectedInput("CHEZHI_OWNER_PASSWORD_FILE", 130)
+		if err == nil {
+			err = p.initializeOwner(ctx, password)
+		}
 	case "db-init":
 		err = p.migrate(ctx)
 	case "db-check":

@@ -1,0 +1,11 @@
+**
+!go.mod
+!go.sum
+!*.go
+!*.html
+!admin-ui.js
+!postgres_*.sql
+!postgres_catalog_v3.json
+!internal/
+!internal/license/
+!internal/license/*.go

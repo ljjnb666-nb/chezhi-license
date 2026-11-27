@@ -1,0 +1,11 @@
+# Local template. Keep the upstream on a private network and trust only
+# this immediate proxy IP on the authorization server.
+https://localhost:8443 {
+    tls /run/secrets/tls_cert /run/secrets/tls_key
+    reverse_proxy 127.0.0.1:8080 {
+        header_up -Forwarded
+        header_up -X-Forwarded-Host
+        header_up X-Forwarded-For {http.request.remote.host}
+        header_up X-Forwarded-Proto https
+    }
+}

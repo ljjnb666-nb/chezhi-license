@@ -221,3 +221,10 @@ P1.2 仍为本机原型，生产数据库和设备持有证明集成仍待开发
 The server keeps the existing loopback-only UI, client API and JSON startup
 command. See [PostgreSQL setup, cutover and recovery](migration/POSTGRES.md) for
 the database backend, PowerShell commands, migration, runtime grants, and backup.
+
+## P2.3 standalone server
+
+Local JSON and PostgreSQL modes keep their existing commands. The
+[standalone server runbook](migration/SERVER.md) covers HTTPS and proxy
+configuration, PostgreSQL-backed authentication, container setup, and recovery.
+Native licensing clients use the [v1 API contract](migration/LICENSE-API.md).

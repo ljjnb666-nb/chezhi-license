@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 	"unicode/utf8"
 )
 
@@ -81,10 +82,13 @@ func (g *adminGateway) verifyOwner(password string) bool {
 func (g *adminGateway) saveOwner(password string) error {
 	return g.saveOwnerContext(context.Background(), password)
 }
-func (g *adminGateway) saveOwnerContext(ctx context.Context, password string) error {
+func deriveOwnerCredential(password string) ownerCredential {
 	saltHex := randomToken()
 	salt, _ := hex.DecodeString(saltHex)
-	c := ownerCredential{1, saltHex, hex.EncodeToString(deriveOwner(password, salt, ownerRounds))}
+	return ownerCredential{1, saltHex, hex.EncodeToString(deriveOwner(password, salt, ownerRounds))}
+}
+func (g *adminGateway) saveOwnerContext(ctx context.Context, password string) error {
+	c := deriveOwnerCredential(password)
 	if g.w.s.pg != nil {
 		revision, err := g.w.s.pg.changeAccount(ctx, Audit{At: g.w.s.now().UTC(), Action: "password_changed", Actor: "admin"},
 			func(ctx context.Context, tx *sql.Tx, revision int64) error { return writeOwner(ctx, tx, c, revision) })
@@ -182,10 +186,32 @@ func (g *adminGateway) handleOwnerPassword(rw http.ResponseWriter, r *http.Reque
 		}
 	}
 	g.mu.Unlock()
-	http.SetCookie(rw, &http.Cookie{Name: sessionCookie, Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, MaxAge: -1})
+	http.SetCookie(rw, sessionCookieFor(r, "", -1))
 	if g.w.s.pg == nil && !g.securityAudit("admin", "password_changed") {
 		g.renderLogin(rw, 200, "密码已更新，请使用新密码登录。安全日志写入失败，请检查数据目录。")
 		return
 	}
 	http.Redirect(rw, r, "/login", 303)
+}
+
+func (p *postgresStore) initializeOwner(ctx context.Context, password string) error {
+	if !utf8.ValidString(password) || utf8.RuneCountInString(password) < 14 || len(password) > 128 {
+		return errors.New("owner password must be 14 or more characters and at most 128 bytes")
+	}
+	credential := deriveOwnerCredential(password)
+	_, err := p.changeAccount(ctx, Audit{At: time.Now().UTC(), Action: "password_changed", Actor: "admin"},
+		func(ctx context.Context, tx *sql.Tx, revision int64) error {
+			if err := verifyMigratorRole(ctx, tx); err != nil {
+				return err
+			}
+			var exists bool
+			if err := tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT FROM chezhi_owner)").Scan(&exists); err != nil {
+				return errDatabase
+			}
+			if exists {
+				return errors.New("owner password is already configured")
+			}
+			return writeOwner(ctx, tx, credential, revision)
+		})
+	return err
 }
