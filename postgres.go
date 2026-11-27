@@ -28,7 +28,10 @@ var postgresV4 string
 //go:embed postgres_v5.sql
 var postgresV5 string
 
-var postgresMigrations = []string{postgresV1, postgresV2, postgresV3, postgresV4, postgresV5}
+//go:embed postgres_v6.sql
+var postgresV6 string
+
+var postgresMigrations = []string{postgresV1, postgresV2, postgresV3, postgresV4, postgresV5, postgresV6}
 
 var errCommitUnknown = errors.New("database commit result unknown")
 
@@ -306,9 +309,12 @@ type mutationScope struct {
 
 func (p *postgresStore) mutate(ctx context.Context, scope mutationScope, apply func(*State) error) error {
 	if scope.readOnly {
-		return p.transaction(ctx, &sql.TxOptions{ReadOnly: true}, func(ctx context.Context, tx *sql.Tx) error {
+		return p.transaction(ctx, &sql.TxOptions{ReadOnly: true, Isolation: sql.LevelRepeatableRead}, func(ctx context.Context, tx *sql.Tx) error {
 			cards, err := queryCards(ctx, tx, " WHERE c.hash=$1", scope.hash)
 			if err != nil {
+				return err
+			}
+			if err := denyLegacyCard(ctx, tx, cards); err != nil {
 				return err
 			}
 			return apply(&State{Cards: cards})
@@ -331,6 +337,11 @@ func (p *postgresStore) mutate(ctx context.Context, scope mutationScope, apply f
 		if err != nil {
 			return err
 		}
+		if scope.hash != "" {
+			if err := denyLegacyCard(ctx, tx, previous.Cards); err != nil {
+				return err
+			}
+		}
 		next := clone(previous)
 		if err = apply(&next); err != nil {
 			return err
@@ -348,6 +359,11 @@ func (p *postgresStore) mutate(ctx context.Context, scope mutationScope, apply f
 			for i, c := range next.Cards {
 				if c == previous.Cards[i] {
 					continue
+				}
+				if c.Device != previous.Cards[i].Device || c.Revoked != previous.Cards[i].Revoked {
+					if scope.hash == "" {
+						if err := resetSecureBinding(ctx, tx, c.ID); err != nil { return err }
+					}
 				}
 				if err = dbExec(ctx, tx, `UPDATE chezhi_cards SET activated=$2,expires=$3,device=$4,revoked=$5 WHERE id=$1`,
 					c.ID, sqlOptionalTime(c.Activated), sqlOptionalTime(c.Expires), c.Device, c.Revoked); err != nil {
