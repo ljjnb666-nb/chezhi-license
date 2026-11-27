@@ -150,7 +150,7 @@ func (p *postgresStore) checkDeployment(ctx context.Context, q rowQueryer) error
 }
 
 func (p *postgresStore) offlineSecurity(ctx context.Context, name, nextMode string) error {
-	var sessions, rates int
+	var sessions, rates, challenges int
 	mode := nextMode
 	err := p.transaction(ctx, &sql.TxOptions{}, func(ctx context.Context, tx *sql.Tx) error {
 		var acquired bool
@@ -194,6 +194,10 @@ func (p *postgresStore) offlineSecurity(ctx context.Context, name, nextMode stri
             SELECT count(*) FROM removed`).Scan(&rates) != nil {
 			return errDatabase
 		}
+		if tx.QueryRowContext(ctx, `WITH removed AS (DELETE FROM chezhi_challenges RETURNING 1)
+            SELECT count(*) FROM removed`).Scan(&challenges) != nil {
+			return errDatabase
+		}
 		if err := dbExec(ctx, tx, `UPDATE chezhi_deployment SET mode=$1,generation=generation+1,
             database_name=current_database(), database_oid=(SELECT oid FROM pg_database WHERE datname=current_database()),
             cluster_id=(SELECT system_identifier FROM pg_control_system())
@@ -206,7 +210,7 @@ func (p *postgresStore) offlineSecurity(ctx context.Context, name, nextMode stri
 		return nil
 	})
 	if err == nil {
-		fmt.Printf("Security state reset: mode=%s sessions=%d rate_buckets=%d\n", mode, sessions, rates)
+		fmt.Printf("Security state reset: mode=%s sessions=%d rate_buckets=%d challenges=%d\n", mode, sessions, rates, challenges)
 	}
 	return err
 }
