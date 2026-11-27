@@ -198,6 +198,9 @@ func (p *postgresStore) offlineSecurity(ctx context.Context, name, nextMode stri
             SELECT count(*) FROM removed`).Scan(&challenges) != nil {
 			return errDatabase
 		}
+		if nextMode == "" {
+			if err := refreshSigningScope(ctx, tx); err != nil { return err }
+		}
 		if err := dbExec(ctx, tx, `UPDATE chezhi_deployment SET mode=$1,generation=generation+1,
             database_name=current_database(), database_oid=(SELECT oid FROM pg_database WHERE datname=current_database()),
             cluster_id=(SELECT system_identifier FROM pg_control_system())
