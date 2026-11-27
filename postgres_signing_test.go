@@ -8,6 +8,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/x509"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
@@ -20,6 +21,7 @@ import (
 	"time"
 
 	"chezhi.local/licenseprototype/internal/license"
+	"chezhi.local/licenseprototype/internal/licenseclient"
 	"chezhi.local/licenseprototype/internal/proof"
 )
 
@@ -124,6 +126,14 @@ func TestPostgresSigningPolicyV2(t *testing.T) {
 	transcript,_:=hex.DecodeString(transcriptHex)
 	if !ed25519.Verify(pub,transcript,signed){t.Fatal("invalid credential signature")}
 	post("activate",body,403)
+	roots:=x509.NewCertPool()
+	roots.AddCert(server.Certificate())
+	client,err:=licenseclient.New(server.URL,signer.policy.scope,pub,roots)
+	if err!=nil{t.Fatal(err)}
+	defer client.Close()
+	claims,err:=client.Authorize(ctx,proof.Validate,keys[0],dev)
+	if err!=nil || claims.Revision==0{t.Fatal("reference client online validation",err)}
+	if _,err:=client.Authorize(ctx,proof.Renew,keys[0],dev);err!=nil{t.Fatal("reference client renewal",err)}
 	lease,err:=s.pg.attachDeployment(ctx,"local")
 	if err!=nil{t.Fatal(err)}
 	newPub,_,err:=ed25519.GenerateKey(rand.Reader)
