@@ -23,6 +23,7 @@ import (
 	"chezhi.local/licenseprototype/internal/license"
 	"chezhi.local/licenseprototype/internal/licenseclient"
 	"chezhi.local/licenseprototype/internal/proof"
+	"chezhi.local/licenseprototype/internal/sdk"
 )
 
 // Construct a historical fixture using only the original schema's SQL,
@@ -137,6 +138,22 @@ func TestPostgresSigningPolicyV2(t *testing.T) {
 	claims,err:=client.Authorize(ctx,proof.Validate,keys[0],dev)
 	if err!=nil || claims.Revision==0{t.Fatal("reference client online validation",err)}
 	if _,err:=client.Authorize(ctx,proof.Renew,keys[0],dev);err!=nil{t.Fatal("reference client renewal",err)}
+	adapter,err:=sdk.NewDeviceSigner(device,func(d [32]byte)(out [64]byte,err error){
+		r,s,err:=ecdsa.Sign(rand.Reader,dev,d[:])
+		if err==nil{r.FillBytes(out[:32]);s.FillBytes(out[32:])}
+		return
+	})
+	if err!=nil{t.Fatal(err)}
+	sdkConfig:=sdk.Config{Origin:server.URL,Deployment:signer.policy.scope.Deployment,TrustedKey:pub,Roots:roots}
+	metadata,status:=sdk.Authorize(ctx,sdkConfig,proof.Validate,keys[0],adapter)
+	if status!=sdk.OK || metadata.Revision!=claims.Revision || metadata.LicenseExpiresAt!=claims.LicenseExpiresAt {
+		t.Fatal("SDK external signer integration",status,metadata)
+	}
+	foreign,err:=ecdsa.GenerateKey(elliptic.P256(),rand.Reader)
+	if err!=nil{t.Fatal(err)}
+	if metadata,status:=sdk.Authorize(ctx,sdkConfig,proof.Validate,keys[0],foreign);status!=sdk.Denied||metadata!=(sdk.Result{}) {
+		t.Fatal("SDK wrong device result",status,metadata)
+	}
 	lease,err:=s.pg.attachDeployment(ctx,"local")
 	if err!=nil{t.Fatal(err)}
 	newPub,_,err:=ed25519.GenerateKey(rand.Reader)

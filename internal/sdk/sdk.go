@@ -7,6 +7,7 @@ import (
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/x509"
 	"encoding/asn1"
 	"encoding/binary"
 	"errors"
@@ -41,6 +42,9 @@ type Config struct {
 	Origin string
 	Deployment proof.Digest
 	TrustedKey ed25519.PublicKey
+	// Roots is for independently provisioned private CA roots. The DLL
+	// uses system roots only; integration fixtures use an isolated pool.
+	Roots *x509.CertPool
 }
 
 // DeviceSigner adapts an external P-256 provider that produces IEEE P1363
@@ -116,7 +120,7 @@ func Authorize(ctx context.Context,c Config,op proof.Operation,card string,devic
 	ctx,cancel:=context.WithTimeout(ctx,RequestTimeout)
 	defer cancel()
 	if ctx.Err()!=nil { return Result{},classify(ctx,ctx.Err()) }
-	client,err:=licenseclient.New(c.Origin,proof.Scope{Deployment:c.Deployment,Product:"chezhi"},c.TrustedKey,nil)
+	client,err:=licenseclient.New(c.Origin,proof.Scope{Deployment:c.Deployment,Product:"chezhi"},c.TrustedKey,c.Roots)
 	if err!=nil { return Result{},classify(ctx,err) }
 	defer client.Close()
 	claims,err:=client.Authorize(ctx,op,card,device)

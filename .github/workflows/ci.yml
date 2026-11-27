@@ -59,6 +59,34 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           (Get-FileHash bin/chezhi-license-win-x64.exe -Algorithm SHA256).Hash
       - if: runner.os == 'Windows'
+        name: Build native SDK and exercise .NET Framework ABI
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $gcc = Get-Command gcc.exe -ErrorAction SilentlyContinue
+          if (-not $gcc) {
+            $candidate = 'C:\mingw64\bin\gcc.exe'
+            if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) { throw 'x64 MinGW gcc unavailable on runner' }
+            $env:Path = (Split-Path -Parent $candidate) + ';' + $env:Path
+            $gcc = Get-Command gcc.exe
+          }
+          $machine = (& $gcc.Source -dumpmachine)
+          if ($LASTEXITCODE -ne 0 -or $machine -notmatch '^x86_64.*mingw') { throw "Unexpected native toolchain: $machine" }
+          & $gcc.Source --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:CGO_ENABLED = '1'
+          $env:GOOS = 'windows'
+          $env:GOARCH = 'amd64'
+          $env:CC = $gcc.Source
+          go build -trimpath -buildmode=c-shared -o bin/chezhi_license_sdk.dll ./cmd/windows-license-sdk
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+          & $csc /nologo /target:exe /platform:x64 /out:bin/AbiSmoke.exe sdk/windows/AbiSmoke.cs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & ./bin/AbiSmoke.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          (Get-FileHash bin/chezhi_license_sdk.dll -Algorithm SHA256).Hash
+      - if: runner.os == 'Windows'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: windows-x64-ci-build
