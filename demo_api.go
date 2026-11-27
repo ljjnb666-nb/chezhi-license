@@ -64,9 +64,7 @@ func (w Web) demoActivate(rw http.ResponseWriter, r *http.Request) {
 		http.Error(rw, "invalid JSON", 400)
 		return
 	}
-	if !w.s.allowActivation() {
-		rw.Header().Set("Retry-After", "60")
-		http.Error(rw, "rate limited", 429)
+	if !w.consumeLicenseBudget(rw, r, func(status int, _ string) { http.Error(rw, http.StatusText(status), status) }) {
 		return
 	}
 	res, err := w.s.validateContext(r.Context(), req.Key, req.Device)

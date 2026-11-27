@@ -151,6 +151,9 @@ func (s *Store) validate(raw, device string) (license.ValidationResult, error) {
 	return s.validateContext(context.Background(), raw, device)
 }
 func (s *Store) validateContext(ctx context.Context, raw, device string) (license.ValidationResult, error) {
+	return s.checkLicense(ctx, raw, device, true)
+}
+func (s *Store) checkLicense(ctx context.Context, raw, device string, bind bool) (license.ValidationResult, error) {
 	if len(raw) > 100 || len(device) > 200 || strings.TrimSpace(device) == "" {
 		return license.ValidationResult{Reason: "invalid_input"}, nil
 	}
@@ -158,7 +161,7 @@ func (s *Store) validateContext(ctx context.Context, raw, device string) (licens
 	dh := sha256.Sum256([]byte(strings.TrimSpace(device)))
 	d := hex.EncodeToString(dh[:])
 	var result license.ValidationResult
-	err := s.mutate(ctx, mutationScope{hash: h}, func(x *State) error {
+	err := s.mutate(ctx, mutationScope{hash: h, readOnly: !bind}, func(x *State) error {
 		now := s.now().UTC()
 		for i := range x.Cards {
 			c := &x.Cards[i]
@@ -176,6 +179,10 @@ func (s *Store) validateContext(ctx context.Context, raw, device string) (licens
 			}
 			if c.Device != "" && c.Device != d {
 				result.Reason = "device_mismatch"
+				return nil
+			}
+			if !bind && (c.Activated == nil || c.Device == "") {
+				result.Reason = "activation_required"
 				return nil
 			}
 			changed := false

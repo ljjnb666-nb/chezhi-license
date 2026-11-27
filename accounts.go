@@ -230,7 +230,14 @@ func (s *Store) backup() ([]byte, error) {
 	return s.backupContext(context.Background())
 }
 func (s *Store) backupContext(ctx context.Context) ([]byte, error) {
-	snapshot, catalog, err := s.readView(ctx, true)
+	var snapshot State
+	var catalog []Plan
+	var err error
+	if _, shared := ctx.Value(serverRequestKey{}).(serverRequest); shared {
+		snapshot, catalog, err = s.pg.readServerExport(ctx, true)
+	} else {
+		snapshot, catalog, err = s.readView(ctx, true)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -295,6 +302,10 @@ func (w Web) downloadBackup(rw http.ResponseWriter, r *http.Request) {
 		return
 	}
 	b, e := w.s.backupContext(r.Context())
+	if errors.Is(e, errExportLimit) {
+		http.Error(rw, "数据量超过交互备份上限，请使用 PostgreSQL 原生备份", 422)
+		return
+	}
 	if e != nil {
 		http.Error(rw, "备份失败", 500)
 		return
@@ -341,7 +352,17 @@ func safeCSV(s string) string {
 	return s
 }
 func (w Web) exportCards(rw http.ResponseWriter, r *http.Request) {
-	state, _, err := w.s.readView(r.Context(), true)
+	var state State
+	var err error
+	if _, shared := r.Context().Value(serverRequestKey{}).(serverRequest); shared {
+		state, _, err = w.s.pg.readServerExport(r.Context(), false)
+	} else {
+		state, _, err = w.s.readView(r.Context(), true)
+	}
+	if errors.Is(err, errExportLimit) {
+		http.Error(rw, "数据量超过交互导出上限，请使用 PostgreSQL 运维导出", 422)
+		return
+	}
 	if err != nil {
 		http.Error(rw, "database unavailable", 503)
 		return

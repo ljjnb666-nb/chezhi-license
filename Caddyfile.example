@@ -1,0 +1,16 @@
+# Local template. Put the upstream on a private interface and trust only
+# the immediate Caddy peer on the authorization server.
+{
+    admin off
+    auto_https disable_redirects
+}
+https://localhost:8443 {
+    bind 127.0.0.1
+    tls /run/secrets/tls_cert /run/secrets/tls_key
+    reverse_proxy 127.0.0.1:8080 {
+        header_up -Forwarded
+        header_up -X-Forwarded-Host
+        header_up X-Forwarded-For {http.request.remote.host}
+        header_up X-Forwarded-Proto https
+    }
+}

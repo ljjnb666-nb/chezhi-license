@@ -59,8 +59,8 @@ func pageNum(s string, n int) (int, int) {
 	}
 	return p, pages
 }
-func buildDashboard(s State, now time.Time, q url.Values) Dashboard {
-	d := Dashboard{QQ: s.QQ, Q: strings.TrimSpace(q.Get("q")), Status: q.Get("status"), Channel: q.Get("channel")}
+func dashboardFilters(qq string, q url.Values) Dashboard {
+	d := Dashboard{QQ: qq, Q: strings.TrimSpace(q.Get("q")), Status: q.Get("status"), Channel: q.Get("channel")}
 	if len(d.Q) > 80 {
 		d.Q = ""
 	}
@@ -74,6 +74,11 @@ func buildDashboard(s State, now time.Time, q url.Values) Dashboard {
 	default:
 		d.Channel = ""
 	}
+	return d
+}
+
+func buildDashboard(s State, now time.Time, q url.Values) Dashboard {
+	d := dashboardFilters(s.QQ, q)
 	orders := map[string]bool{}
 	var filtered []Card
 	for i := len(s.Cards) - 1; i >= 0; i-- {
@@ -115,6 +120,11 @@ func buildDashboard(s State, now time.Time, q url.Values) Dashboard {
 	for i := d.AuditCount - 1 - (d.AuditPage-1)*20; i >= 0 && len(d.Audits) < 20; i-- {
 		d.Audits = append(d.Audits, s.Audit[i])
 	}
+	d.addLinks()
+	return d
+}
+
+func (d *Dashboard) addLinks() {
 	link := func(p, ap int) string {
 		v := url.Values{"view": {"cards"}, "q": {d.Q}, "status": {d.Status}, "channel": {d.Channel}, "page": {strconv.Itoa(p)}, "ap": {strconv.Itoa(ap)}}
 		return "/?" + v.Encode()
@@ -131,7 +141,6 @@ func buildDashboard(s State, now time.Time, q url.Values) Dashboard {
 	if d.AuditPage < d.AuditPages {
 		d.AuditNext = "/?view=audit&ap=" + strconv.Itoa(d.AuditPage+1)
 	}
-	return d
 }
 
 // Explicit section navigation, with backwards-compatible legacy filter URLs.
@@ -160,6 +169,10 @@ func auditLabel(action string) string {
 		return "退出全部会话"
 	case "password_changed":
 		return "更新管理员密码"
+	case "runtime_mode_changed":
+		return "切换运行模式并清理会话"
+	case "security_recovered":
+		return "恢复后重置安全状态"
 	case "password_failed":
 		return "密码验证失败"
 	case "issue":

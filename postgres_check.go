@@ -15,8 +15,8 @@ import (
 //go:embed postgres_catalog.sql
 var postgresCatalogSQL string
 
-//go:embed postgres_catalog_v2.json
-var postgresCatalogV2 string
+//go:embed postgres_catalog_v4.json
+var postgresCatalogV4 string
 
 func verifyPostgresCatalog(ctx context.Context, tx *sql.Tx) error {
 	var manifest string
@@ -24,7 +24,7 @@ func verifyPostgresCatalog(ctx context.Context, tx *sql.Tx) error {
 		return errors.New("cannot read PostgreSQL catalog")
 	}
 	var actual, expected map[string]string
-	if json.Unmarshal([]byte(manifest), &actual) != nil || json.Unmarshal([]byte(postgresCatalogV2), &expected) != nil {
+	if json.Unmarshal([]byte(manifest), &actual) != nil || json.Unmarshal([]byte(postgresCatalogV4), &expected) != nil {
 		return errors.New("invalid PostgreSQL catalog manifest")
 	}
 	var mismatches []string
@@ -54,8 +54,15 @@ func (p *postgresStore) verifyDatabase(ctx context.Context, profile string) erro
 		if err := verifyPostgresData(ctx, tx, profile != "--runtime"); err != nil {
 			return err
 		}
+		_, bound, err := deploymentState(ctx, tx)
+		if err != nil {
+			return errors.New("PostgreSQL deployment singleton is missing or unreadable")
+		}
 		switch profile {
 		case "--runtime":
+			if !bound {
+				return errDeployment
+			}
 			return verifyRuntimeRole(ctx, tx)
 		case "--migrator":
 			return verifyMigratorRole(ctx, tx)
@@ -105,6 +112,18 @@ func verifyPostgresData(ctx context.Context, tx *sql.Tx, includeImport bool) err
 			return errors.New("invalid PostgreSQL account revision")
 		}
 	}
+	var sessionsOK bool
+	if tx.QueryRowContext(ctx, `SELECT NOT EXISTS (
+        SELECT FROM chezhi_sessions s LEFT JOIN chezhi_members m ON m.name=s.principal
+        LEFT JOIN chezhi_owner o ON o.singleton AND s.principal='admin'
+        WHERE NOT isfinite(s.expires) OR (s.principal='admin' AND o.revision IS DISTINCT FROM s.revision)
+        OR (s.principal<>'admin' AND (m.disabled IS DISTINCT FROM false OR m.revision IS DISTINCT FROM s.revision OR m.role IS DISTINCT FROM s.role))
+    )`).Scan(&sessionsOK) != nil {
+		return errDatabase
+	}
+	if !sessionsOK {
+		return errors.New("invalid PostgreSQL session ownership or revision")
+	}
 	if includeImport {
 		var valid bool
 		if err := tx.QueryRowContext(ctx, `SELECT NOT EXISTS (SELECT 1 FROM chezhi_import
@@ -125,7 +144,7 @@ func verifyMigratorRole(ctx context.Context, tx *sql.Tx) error {
       AND NOT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
         WHERE n.nspname='public' AND relname IN
         ('chezhi_schema','chezhi_config','chezhi_orders','chezhi_cards','chezhi_audit','chezhi_plans',
-         'chezhi_members','chezhi_owner','chezhi_import','chezhi_cards_position_seq','chezhi_audit_position_seq')
+         'chezhi_members','chezhi_owner','chezhi_import','chezhi_sessions','chezhi_rate_limits','chezhi_deployment','chezhi_cards_position_seq','chezhi_audit_position_seq')
         AND NOT pg_has_role(current_user,c.relowner,'USAGE'))
       AND EXISTS (SELECT 1 FROM pg_type t JOIN pg_namespace n ON n.oid=t.typnamespace
         WHERE n.nspname='public' AND t.typname='chezhi_instant' AND pg_has_role(current_user,t.typowner,'USAGE'))`).Scan(&ok); err != nil {
@@ -147,7 +166,7 @@ func verifyRuntimeRole(ctx context.Context, tx *sql.Tx) error {
         AND NOT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
             WHERE n.nspname='public' AND c.relname IN
             ('chezhi_schema','chezhi_config','chezhi_orders','chezhi_cards','chezhi_audit','chezhi_plans',
-             'chezhi_members','chezhi_owner','chezhi_import','chezhi_cards_position_seq','chezhi_audit_position_seq')
+             'chezhi_members','chezhi_owner','chezhi_import','chezhi_sessions','chezhi_rate_limits','chezhi_deployment','chezhi_cards_position_seq','chezhi_audit_position_seq')
             AND pg_has_role(current_user,c.relowner,'USAGE'))
         FROM pg_roles WHERE rolname=current_user`).Scan(&limited); err != nil {
 		return errDatabase
@@ -157,22 +176,26 @@ func verifyRuntimeRole(ctx context.Context, tx *sql.Tx) error {
 	}
 	var privileges bool
 	if err := tx.QueryRowContext(ctx, `
-        WITH expected(rel, can_select, can_insert, updates) AS (VALUES
-            ('chezhi_schema', true, false, ARRAY[]::text[]),
-            ('chezhi_config', true, false, ARRAY['qq','accounts_revision']),
-            ('chezhi_orders', true, true, ARRAY[]::text[]),
-            ('chezhi_cards', true, true, ARRAY['activated','expires','device','revoked']),
-            ('chezhi_audit', true, true, ARRAY[]::text[]),
-            ('chezhi_plans', true, false, ARRAY['cents','visible']),
-            ('chezhi_members', true, true, ARRAY['role','digest','disabled','revision']),
-            ('chezhi_owner', true, true, ARRAY['version','salt','digest','revision']),
-            ('chezhi_import', false, false, ARRAY[]::text[])
+        WITH expected(rel, can_select, can_insert, can_delete, updates) AS (VALUES
+            ('chezhi_schema', true, false, false, ARRAY[]::text[]),
+            ('chezhi_config', true, false, false, ARRAY['qq','accounts_revision']),
+            ('chezhi_orders', true, true, false, ARRAY[]::text[]),
+            ('chezhi_cards', true, true, false, ARRAY['activated','expires','device','revoked']),
+            ('chezhi_audit', true, true, false, ARRAY[]::text[]),
+            ('chezhi_plans', true, false, false, ARRAY['cents','visible']),
+            ('chezhi_members', true, true, false, ARRAY['role','digest','disabled','revision']),
+            ('chezhi_owner', true, true, false, ARRAY['version','salt','digest','revision']),
+            ('chezhi_import', false, false, false, ARRAY[]::text[]),
+            ('chezhi_sessions', true, true, true, ARRAY[]::text[]),
+            ('chezhi_rate_limits', true, true, true, ARRAY['used']),
+            ('chezhi_deployment', true, false, false, ARRAY[]::text[])
         )
         SELECT NOT EXISTS (
             SELECT 1 FROM expected e, LATERAL (SELECT to_regclass('public.' || e.rel) AS oid) c
-            WHERE has_table_privilege(c.oid,'SELECT') <> e.can_select
+            WHERE c.oid IS NULL OR has_table_privilege(c.oid,'SELECT') <> e.can_select
                OR has_table_privilege(c.oid,'INSERT') <> e.can_insert
-               OR has_table_privilege(c.oid,'DELETE,TRUNCATE,TRIGGER,REFERENCES,MAINTAIN')
+               OR has_table_privilege(c.oid,'DELETE') <> e.can_delete
+               OR has_table_privilege(c.oid,'TRUNCATE,TRIGGER,REFERENCES,MAINTAIN')
                OR EXISTS (
                    SELECT 1 FROM pg_attribute a WHERE a.attrelid=c.oid AND a.attnum>0 AND NOT a.attisdropped
                    AND (has_column_privilege(c.oid,a.attname,'UPDATE') <> (a.attname=ANY(e.updates))

@@ -9,3 +9,7 @@ GRANT UPDATE (cents, visible) ON chezhi_plans TO chezhi_runtime;
 GRANT UPDATE (role, digest, disabled, revision) ON chezhi_members TO chezhi_runtime;
 GRANT UPDATE (version, salt, digest, revision) ON chezhi_owner TO chezhi_runtime;
 GRANT USAGE ON SEQUENCE chezhi_cards_position_seq, chezhi_audit_position_seq TO chezhi_runtime;
+GRANT SELECT, INSERT, DELETE ON chezhi_sessions TO chezhi_runtime;
+GRANT SELECT, INSERT, DELETE ON chezhi_rate_limits TO chezhi_runtime;
+GRANT UPDATE (used) ON chezhi_rate_limits TO chezhi_runtime;
+GRANT SELECT ON chezhi_deployment TO chezhi_runtime;

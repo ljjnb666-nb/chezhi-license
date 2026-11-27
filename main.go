@@ -76,6 +76,10 @@ func (w Web) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 		http.Error(rw, "invalid host", 400)
 		return
 	}
+	if strings.HasPrefix(r.URL.Path, "/api/v1/") || r.URL.Path == "/api/v1" {
+		w.licenseAPI(rw, r)
+		return
+	}
 	if r.URL.Path == "/purchase" {
 		w.purchase(rw, r)
 		return
@@ -89,7 +93,8 @@ func (w Web) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 		return
 	}
 	u, p, ok := r.BasicAuth()
-	if !ok || u != "admin" || subtle.ConstantTimeCompare([]byte(p), []byte(w.token)) != 1 {
+	_, hasPrincipal := r.Context().Value(principalKey{}).(Principal)
+	if !hasPrincipal && (!ok || u != "admin" || subtle.ConstantTimeCompare([]byte(p), []byte(w.token)) != 1) {
 		rw.Header().Set("WWW-Authenticate", `Basic realm="CheZhi Local Prototype"`)
 		http.Error(rw, "authentication required", 401)
 		return
@@ -209,18 +214,25 @@ func (w Web) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 		http.Error(rw, "method not allowed", 405)
 		return
 	}
-	snapshot, plans, err := w.s.readView(r.Context(), true)
+	var err error
+	if _, shared := r.Context().Value(serverRequestKey{}).(serverRequest); shared {
+		err = w.s.pg.dashboardPage(r.Context(), &v, r.URL.Query())
+	} else {
+		var snapshot State
+		var plans []Plan
+		snapshot, plans, err = w.s.readView(r.Context(), true)
+		if err == nil {
+			v.Plans = plans
+			v.Dashboard = buildDashboard(snapshot, v.Now, r.URL.Query())
+			v.Operations = buildOperations(snapshot, v.Now, v.Section, r.URL.Query())
+		}
+	}
 	rw.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err != nil {
-		// Acknowledged writes and their one-time response survive the read failure.
 		v.SnapshotUnavailable = true
 		if v.Message == "" {
 			rw.WriteHeader(http.StatusServiceUnavailable)
 		}
-	} else {
-		v.Plans = plans
-		v.Dashboard = buildDashboard(snapshot, v.Now, r.URL.Query())
-		v.Operations = buildOperations(snapshot, v.Now, v.Section, r.URL.Query())
 	}
 	if e := page.Execute(rw, v); e != nil {
 		log.Print("render failed")
@@ -228,6 +240,9 @@ func (w Web) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 }
 func (w Web) originOK(r *http.Request) bool {
 	o := r.Header.Values("Origin")
+	if settings, ok := r.Context().Value(serverRequestKey{}).(serverRequest); ok {
+		return len(o) == 1 && o[0] == settings.config.origin
+	}
 	return len(o) == 0 || len(o) == 1 && o[0] == "http://"+w.host
 }
 func (w Web) activationCSRF() string {
@@ -255,9 +270,7 @@ func (w Web) activate(rw http.ResponseWriter, r *http.Request) {
 			http.Error(rw, "invalid form origin or token", 403)
 			return
 		}
-		if !w.s.allowActivation() {
-			rw.Header().Set("Retry-After", "60")
-			http.Error(rw, "操作过于频繁，请稍后重试", 429)
+		if !w.consumeLicenseBudget(rw, r, func(status int, _ string) { http.Error(rw, http.StatusText(status), status) }) {
 			return
 		}
 		res, err := w.s.validateContext(r.Context(), r.PostForm.Get("key"), r.PostForm.Get("device"))
@@ -292,15 +305,55 @@ func main() {
 func run(ctx context.Context, args []string) error {
 	if len(args) > 0 {
 		switch args[0] {
-		case "db-init", "db-check", "db-import":
+		case "health-probe":
+			if len(args) != 1 {
+				return errors.New("unexpected health probe arguments")
+			}
+			return probeReadiness(ctx)
+		case "db-init", "db-check", "db-import", "db-owner-init", "db-set-mode", "db-recover-security":
 			return databaseCommand(ctx, args)
 		}
 	}
 	backend := os.Getenv("CHEZHI_STORAGE")
+	switch mode := os.Getenv("CHEZHI_MODE"); mode {
+	case "server", "test":
+		if backend != "" && backend != "postgres" {
+			return errors.New("server and test modes require PostgreSQL")
+		}
+		config, err := loadServerConfig(mode)
+		if err != nil {
+			return err
+		}
+		dsn, err := configuredDatabaseURL()
+		if err != nil {
+			return err
+		}
+		p, err := openPostgres(ctx, dsn)
+		if err != nil {
+			return err
+		}
+		defer p.db.Close()
+		if err := p.checkSchema(ctx); err != nil {
+			return err
+		}
+		release, err := p.attachDeployment(ctx, mode)
+		if err != nil {
+			return err
+		}
+		defer release()
+		return serveIndependent(ctx, config, p)
+	case "", "local":
+	default:
+		return errors.New("CHEZHI_MODE must be local, server or test")
+	}
 	var s *Store
 	switch backend {
 	case "postgres":
-		p, err := openPostgres(ctx, os.Getenv("CHEZHI_DATABASE_URL"))
+		dsn, err := configuredDatabaseURL()
+		if err != nil {
+			return err
+		}
+		p, err := openPostgres(ctx, dsn)
 		if err != nil {
 			return err
 		}
@@ -308,6 +361,11 @@ func run(ctx context.Context, args []string) error {
 		if err = p.checkSchema(ctx); err != nil {
 			return err
 		}
+		release, err := p.attachDeployment(ctx, "local")
+		if err != nil {
+			return err
+		}
+		defer release()
 		s = &Store{pg: p, now: time.Now}
 	case "", "json":
 		var release func()
@@ -382,7 +440,14 @@ func (l *localDirectoryLock) release() {
 }
 
 func serve(ctx context.Context, s *Store) error {
-	ln, e := net.Listen("tcp4", "127.0.0.1:0")
+	local := os.Getenv("CHEZHI_LISTEN")
+	if local == "" {
+		local = "127.0.0.1:0"
+	}
+	if addr, err := listenAddress(local, true); err != nil || !addr.IsLoopback() {
+		return errors.New("local mode requires a loopback listener")
+	}
+	ln, e := net.Listen("tcp", local)
 	if e != nil {
 		return e
 	}
