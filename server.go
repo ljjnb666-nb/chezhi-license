@@ -298,7 +298,8 @@ func (h *serverRouter) ServeHTTP(raw http.ResponseWriter, r *http.Request) {
 	id := randomToken()[:32]
 	group, label := 0, "admin"
 	queue := h.admin
-	isAPI := strings.HasPrefix(r.URL.Path, "/api/v1/") || r.URL.Path == "/api/v1"
+	v2 := isV2Path(r.URL.Path)
+	isAPI := v2 || strings.HasPrefix(r.URL.Path, "/api/v1/") || r.URL.Path == "/api/v1"
 	switch {
 	case isAPI || r.URL.Path == "/activate" || r.URL.Path == "/purchase" || r.URL.Path == "/api/demo/activate":
 		group, label, queue = 1, "public", h.public
@@ -321,6 +322,10 @@ func (h *serverRouter) ServeHTTP(raw http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Strict-Transport-Security", "max-age=31536000")
 	}
 	reject := func(status int, code string) {
+		if v2 {
+			writeV2(w,status,id,nil,code)
+			return
+		}
 		if isAPI {
 			writeAPI(w, status, id, nil, code)
 			return
