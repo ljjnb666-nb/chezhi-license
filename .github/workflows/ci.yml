@@ -124,6 +124,19 @@ jobs:
           & $exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - if: runner.os == 'Windows'
+        name: Authorization state and concurrency invariants
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+          $src = (Resolve-Path -LiteralPath 'sdk/windows/AuthorizationState.cs').Path
+          $test = (Resolve-Path -LiteralPath 'sdk/windows/AuthorizationStateSmoke.cs').Path
+          $exe = Join-Path $PWD 'bin\AuthorizationStateSmoke.exe'
+          & $csc /nologo /target:exe /platform:x64 "/out:$exe" $src $test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - if: runner.os == 'Windows'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: windows-x64-ci-build

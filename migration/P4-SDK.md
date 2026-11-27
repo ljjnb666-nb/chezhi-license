@@ -103,7 +103,7 @@ this increment); PostgreSQL SDK integration passed. Benchmark failed on
 mixed workload with no successful issue, so the P5 capacity gate remains
 open and its assertions are unchanged.
 
-### Durable enrollment coordinator (CI pending)
+### Durable enrollment coordinator (software CNG CI passed)
 
 DeviceEnrollment stores one fixed current-user record in HKCU under
 Software\\CheZhiTech\\LicenseIdentity\\v1. Registry single-value replacement
@@ -136,5 +136,44 @@ test-only profiles, actual concurrent processes, tampered DPAPI data, missing
 CNG key and forced termination at both intent and key-created boundaries.
 Test hooks are conditional on CHEZHI_SDK_TEST; do not define for distribution.
 No campus-network-auth code is changed. CI 46005517973 did not run jobs:
-an accidental duplicate YAML section was removed in 476031a. The original
-Windows ABI/CNG tests still require actual execution.
+an accidental duplicate YAML section was removed in 476031a. Run 46006858825 subsequently passed all 10 jobs, including actual .NET
+Framework ABI smoke, software CNG and registry DPAPI crash tests.
+
+## P4.3 authorization state machine (development candidate)
+
+AuthorizationState is UI-independent and belongs to exactly one fixed
+card/device/trust scope. The integration must not reuse it for another
+identity. The only admission predicate is CanStartProtectedOperation;
+it checks current monotonic and UTC expiry, no native request in flight,
+and current verified success. A new check clears the previous grant.
+The conservative monotonic deadline is anchored at request start, bounded
+by signed lifetime and remaining UTC time. No persisted cache, offline
+authorization, or trusted clock across restart is claimed. In-process
+highest revision rejects rollback; persistent rollback defense is separate.
+
+Single-flight tickets are reference identities, never reused. Cancellation,
+network loss, identity recovery and shutdown invalidate any outstanding
+result but retain the physical in-flight slot until the native call returns.
+The coordinator must always complete an issued ticket, including exceptions.
+Late/duplicate results cannot grant authorization. Network reachability is
+a negative hint only; recovery requires a new online exchange. A 403 is
+generic denial, not proof of revocation. Unavailable and retry-later are
+distinct states; provisional minimum retry delays are 5 and 60 seconds,
+using monotonic time. No automatic retry timer or native cancellation
+handle is included yet. No automatic re-enrollment after identity loss.
+
+Before first authorization the user must use already authorized connectivity,
+e.g. the official client or hotspot. No unconditional startup bypass or
+offline grace is approved. Cleanup (stop/disconnect/exit/restore official
+client) must not be gated by this predicate. Exact lifecycle policy for
+an already running authenticated campus session when authorization expires
+must be validated in P4.4, with safe cleanup available at all times.
+The controller does not start/stop network processes or modify campus code.
+The UI must marshal asynchronous results to its own thread and gate actual
+commands, not just button colors. This is not an atomic guarantee across
+a long-running external operation. Native interop, physical TPM, cross-user
+ACL, actual reboot and real campus connectivity remain acceptance gates.
+
+Run 46006858825: 10/10, actual software CNG/DPAPI and ABI tests passed.
+Optimized dashboard median P95 targets passed but mixed 100k read 503
+15/320, issue 503 8/9; P5 capacity remains open.
