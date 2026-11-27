@@ -129,7 +129,7 @@ primitive separately from that consumer. A deployment-wide signing keyring
 and an explicit secure-only issuance policy remain necessary before V2
 HTTP integration.
 
-## V7 authorization epoch and confirmed signing (implementation; CI pending)
+## V7 authorization epoch and confirmed signing (PostgreSQL tests passed; full CI 9/10)
 
 V7 adds `chezhi_cards.auth_epoch`, initialized to 1 for every historical
 card, and advances it in the shared application write paths whenever
@@ -162,25 +162,65 @@ old challenges after unbind/rebind, revoke and integrity checks.
 `TestPostgresCommittedCredential` covers signing failure rollback,
 commit-confirmed claims, signature verification, replay, renewal and revoke.
 CI 45990141404 established the V6 baseline (10/10, including Docker and
-real PostgreSQL). V7 is not yet accepted.
+real PostgreSQL). V7 exact run 45991509773 passed the new PostgreSQL tests, Docker and eight other checks; the dashboard benchmark failed before tests due to a host port collision (55432). No benchmark result is inferred.
+
+## V8 signing policy and opt-in V2 API (implementation; CI pending)
+
+The database signing policy stores only a public key and random deployment
+scope. Existing deployments without a policy remain in legacy/demo mode.
+Once initialized, new cards issued through the application are atomically
+marked secure-only, even before activation. Existing cards are not silently
+reclassified. The runtime role can read but cannot change the policy.
+Independent HTTPS service startup refuses missing or mismatched signing
+keys when the policy exists; V2 is unavailable without that policy.
+
+Generate a new private seed file outside the repository:
+
+    chezhi-license license-key-generate <new-protected-file>
+
+The command prints only the public key and refuses an existing path. Protect
+the file with owner-only access (0600/0400 on Unix; restricted ACL on Windows).
+After offline db-init and grant refresh, initialize the policy as migrator:
+
+    chezhi-license db-set-signing-key <database-name> none <public-key-hex>
+
+For rotation, replace `none` with the expected current public-key SHA-256
+hex digest and provide the new public key. Stop every instance first.
+The change clears pending challenges, advances deployment generation, and
+replaces the scope; clients require explicit updated trust configuration.
+Keep the same key file on each instance, set CHEZHI_SIGNING_KEY_FILE to
+its protected path. Runtime reads the seed, reconstructs Ed25519 key and
+matches the database public key before listening. Do not send the seed over
+HTTP or commit it. Windows ACL verification, key compromise audit history,
+explicit trust distribution and rollback-safe operational procedures remain
+required before release. Logical recovery changes the deployment scope;
+reconcile post-backup key rotations and revocations before reopening traffic.
+Previously signed offline credentials cannot be recalled from offline clients.
+
+The opt-in native HTTPS API is defined in LICENSE-API-V2.md. Its current
+internal credential lifetime is five minutes, provisional for online-first
+validation; this does not approve offline use. Proof and credential handling
+are subject to the existing shared licensing rate budget. Current tests use
+real TLS and PostgreSQL with an injected trusted request context; complete
+process-level and Caddy acceptance are still required.
 
 ## Required integration work (not yet implemented)
 - Apply shared HTTP rate limits to challenge issuance, malformed and failed
   requests; avoid secrets and replayable material in logs.
-- Strict v2 wire decoding, native HTTPS activation/validation/renewal, secure-only
-  policy for newly issued production cards before first activation, deny
+- Verify V2 wire decoding, native HTTPS activation/validation/renewal and secure-only
+  issuance across real processes and proxy transport; test all
   algorithm confusion and all v1/browser/demo downgrade paths for protected
   licenses. Preserve legacy bindings pending explicit authorized migration;
   never silently rebind or reset first activation/expiry/revocation.
-- Server keyring loading, offline rotation, multi-instance consistency,
-  compromise response and recovery fencing; no plaintext private keys in DB.
-- Sign only confirmed authorized claims, no uncommitted credentials; recover
-  uncertain commits through fresh challenges and DB reconciliation.
+- Finish signing-key lifecycle: persistent rotation audit, historical key
+  trust/retirement policy, compromise response, restore acceptance, protected
+  file/ACL verification, and explicit client trust updates.
+- Verify ambiguous commit and response-loss recovery through fresh challenges
+  and DB reconciliation in actual HTTP processes.
 - Reference client, cross-language vectors, real two-process PostgreSQL
   HTTPS negative tests, restore and compatibility tests. P4 integrates
   Windows protected storage and trustworthy time policy.
 - HTTP 503 classification and P5 capacity gates remain open.
 
-Do not deploy or enable v2 until the integration and independent acceptance
-are complete. Existing legacy licenses retain their behavior; secure-marked cards reject
-legacy requests. No V2 endpoint is enabled yet.
+Do not deploy to production until full integration and independent acceptance
+are complete. V2 routes are opt-in only; this increment is not final P3 acceptance.
