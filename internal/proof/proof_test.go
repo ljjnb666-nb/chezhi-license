@@ -19,11 +19,11 @@ func filled(b byte) (d Digest) {
 
 func TestCanonicalChallengeVector(t *testing.T) {
 	c:=Challenge{Scope:Scope{filled(1),"chezhi1"},Operation:Activate,Nonce:filled(2),
-		CardHash:filled(3),Device:filled(4),IssuedAt:1700000000,ExpiresAt:1700000120}
+		CardHash:filled(3),Device:filled(4),Epoch:1,IssuedAt:1700000000,ExpiresAt:1700000120}
 	b,err:=c.Transcript()
 	if err!=nil { t.Fatal(err) }
 	h:=sha256.Sum256(b)
-	if len(b)!=169 || hex.EncodeToString(h[:])!="ef5ec8802b5dff4b1e57496f0bb1b7914c0de1114f94ba52e794a49fe981817d" {
+	if len(b)!=177 || hex.EncodeToString(h[:])!="5f1e67d4edd02f440ea3c2e2c8eab78cfa060a6dcfe31e2b02509a59fa36ab09" {
 		t.Fatal("canonical transcript mismatch")
 	}
 }
@@ -49,9 +49,9 @@ func TestDeviceProof(t *testing.T) {
 	now:=time.Unix(1700000000,0)
 	scope:=Scope{filled(1),"chezhi1"}
 	card:=filled(3)
-	c,err:=NewChallenge(scope,Activate,card,public,now)
+	c,err:=NewChallenge(scope,Activate,card,public,1,now)
 	if err!=nil { t.Fatal(err) }
-	next,err:=NewChallenge(scope,Activate,card,public,now)
+	next,err:=NewChallenge(scope,Activate,card,public,1,now)
 	if err!=nil || next.Nonce==c.Nonce { t.Fatal("challenge generation") }
 	sig:=signDevice(t,k,c)
 	if err:=VerifyChallenge(c,scope,Activate,card,public,sig,now);err!=nil { t.Fatal(err) }
@@ -59,6 +59,7 @@ func TestDeviceProof(t *testing.T) {
 	if err!=nil { t.Fatal(err) }
 	otherPublic:=elliptic.Marshal(other.Curve,other.X,other.Y)
 	mutated:=c; mutated.Nonce=next.Nonce
+	changedEpoch:=c; changedEpoch.Epoch++
 	high:=append([]byte(nil),sig...)
 	s:=new(big.Int).SetBytes(high[32:])
 	s.Sub(k.Params().N,s).FillBytes(high[32:])
@@ -78,6 +79,7 @@ func TestDeviceProof(t *testing.T) {
 		{"wrong product",c,Scope{filled(1),"other"},Activate,card,public,sig,now},
 		{"wrong operation",c,scope,Validate,card,public,sig,now},
 		{"wrong card",c,scope,Activate,filled(5),public,sig,now},
+		{"wrong epoch",changedEpoch,scope,Activate,card,public,sig,now},
 		{"wrong nonce",mutated,scope,Activate,card,public,sig,now},
 		{"expired",c,scope,Activate,card,public,sig,now.Add(ChallengeTTL)},
 		{"future",c,scope,Activate,card,public,sig,now.Add(-time.Second)},
