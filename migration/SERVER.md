@@ -228,3 +228,88 @@ instances without another service. Redis could reduce rate-bucket
 contention at higher load but would require a second service and an explicit
 security/failure model for revocation and recovery. Measure contention
 before revisiting that choice.
+
+## P5 signed-license capacity and operations acceptance
+
+The standalone CI now includes a bounded V2 workload on a disposable
+PostgreSQL database and two real HTTPS instances. Sixteen worker threads
+perform 32 signed renewals of one already-bound synthetic card, obtaining
+the challenge on one instance and completing it on the other. Each instance
+has a three-handler public admission limit; the workload uses two permits
+per instance (four total), leaving headroom for response finalization.
+Worker concurrency is not simultaneous HTTP concurrency. Every
+credential is checked independently with OpenSSL; the card and binding
+snapshots must stay unchanged. A separate eight-way duplicate-proof race
+must yield one success and seven denials. Public request metrics must
+account for all 73 HTTP requests (37/36 per instance), with zero additional
+5xx errors. Rate buckets are reset only in the isolated fixture between
+workloads. Normal production limits are not modified.
+
+The output reports challenge-plus-client-signing, renewal and end-to-end
+P50/P95/P99/max, throughput and pool state. It includes worker queue
+waiting, fresh TLS connections and local OpenSSL process startup; the values
+are not pure server processing latency. V2_RECOVERY_TIMING reports native
+dump duration, target creation/restore duration and elapsed time through
+verified recovery (including trust reconfiguration and credential checks). Independent response verification is outside
+the timed workload. Same-card contention is deliberate; this is a short
+functional capacity regression, not a production peak-load or sustained
+load claim. The existing 10,000/100,000-card dashboard benchmark and
+independent database restore and rotation tests remain mandatory evidence.
+
+Before deployment, select a production concurrency/renewal budget based
+on the intended number of licensed users and renewal interval. Run an
+authorized isolated load profile with distinct devices/cards, representative
+rate limits, mixed issuance/revocation/read traffic, and longer duration.
+Record accepted/denied/429/503 counts, request percentiles, connection-pool
+wait deltas, process memory and CPU, database size, and recovery timings.
+Keep the diagnostics listener private. Monitor readiness failure, 5xx
+error-rate increases and pool saturation; the cumulative error counter
+counts 5xx only, not normal denials or throttling. Do not infer percentiles
+from the timing sum. Use workload latency measurements or a separately
+validated histogram when required.
+
+Set and document RPO/RTO and backup retention before deployment. Existing
+native logical recovery tests validate data and trust scope but do not
+establish a production recovery time or a PITR guarantee. Verify restores
+to newly named isolated databases, reconcile post-backup writes and keep
+the production deployment unchanged until owner-approved acceptance.
+No campus-network or elevated-client operation is involved.
+
+### P5 isolated acceptance freeze — 2026-11-27 UTC
+
+Reviewed exact fa76a7a2550e19aec16f5d8f6e9814ef7a64a0ae against base
+c783a63e58efd5cf1a1826904707852af698b723, CI
+[46039065464](https://github.com/ljjnb666-nb/chezhi-license/actions/runs/46039065464)
+10/10 successful; logs show merge checkout 80d2e37. Source/log review,
+not independent hardware or production rerun.
+
+- Standalone job 140641819140: 32 signed renewals, 16 workers with 4
+  in-flight HTTP permits, 147.35 transactions/s during the short burst.
+  End-to-end P50/P95/P99/max = 90.4/162.8/168.9/168.9 ms.
+  Challenge plus signing P95 = 66.3 ms; renewal P95 = 125.9 ms.
+  Independent signatures, unchanged licensing state, nonce uniqueness
+  and 1 success / 7 denials in duplicate-proof race passed. Public
+  metrics accounted for 73 requests (37/36), zero additional 5xx,
+  zero pool waits during measured 32 renewals. Small sample, not SLO.
+- Same job: dump 0.114 s, create/restore 0.178 s, verified recovery
+  0.706 s (small fixture, excludes backup duration). Old challenge
+  rejection, changed deployment scope, retained secure bindings and
+  revocation, key rotation and actual Caddy TLS passed.
+- Dashboard job 140641818860: repeated 16-reader profile, 192 samples
+  per page per size. Median of trial P95s (ms), 100k cards:
+  overview 373.2, cards 73.9, orders 375.8, devices 74.0, audit 67.0.
+  Current 500 ms target PASS; comparative audited baseline MISS
+  (overview 1064.6). All 10 current size/page combinations meet target.
+  No claim for 1M audit rows or production capacity.
+- HTTP/migration job 140641818770: PYTHON_ACCEPTANCE_SYNTAX_PASS.
+  Other jobs: Go Linux/Windows, real PG, dependency security,
+  Chromium, repository hygiene successful.
+
+Disposition: CONDITIONAL_PASS for P5 defined isolated engineering
+scope; freeze without further expansion of same regression workload.
+P6 / production HOLD: owner-defined load and retention, sustained
+distinct-device workload, resource budgets, backup policy/PITR and
+production RPO/RTO, authorized environment and independent approval.
+No production deployment or claim of complete release. PR #6 remains
+Draft; no merge. New commits require exact-head verification; these
+figures belong only to the reviewed run.
