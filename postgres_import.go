@@ -212,7 +212,9 @@ func databaseCommand(ctx context.Context, args []string) error {
 	command := args[0]
 	var d legacyData
 	profile := ""
-	if command == "db-set-mode" {
+	if command == "db-set-signing-key" {
+		if len(args) != 4 { return errors.New("usage: db-set-signing-key <database-name> <none|current-key-id> <public-key-hex>") }
+	} else if command == "db-set-mode" {
 		if len(args) != 3 || (args[2] != "local" && args[2] != "server" && args[2] != "test") {
 			return errors.New("usage: db-set-mode <database-name> <local|server|test>")
 		}
@@ -266,6 +268,9 @@ func databaseCommand(ctx context.Context, args []string) error {
 	}
 	defer p.db.Close()
 	switch command {
+	case "db-set-signing-key":
+		if err = p.checkSchema(ctx); err != nil { return err }
+		err = p.setSigningPolicy(ctx,args[1],args[2],args[3])
 	case "db-set-mode", "db-recover-security":
 		if err = p.checkSchema(ctx); err != nil {
 			return err
