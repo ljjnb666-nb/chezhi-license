@@ -36,7 +36,7 @@ func TestReferenceClientTrustBoundary(t *testing.T) {
 	var id proof.LicenseID;copy(id[:],h[:12])
 	point:=elliptic.Marshal(dev.Curve,dev.X,dev.Y)
 	_,fp,_:=proof.DevicePublicKey(point)
-	for _,mode:=range []string{"valid","wrong challenge","duplicate field","wrong signature","wrong device","wrong scope","long ttl","redirect","wrong ca","revision rollback"} {
+	for _,mode:=range []string{"valid","wrong challenge","duplicate field","wrong signature","wrong nonce","wrong device","wrong scope","long ttl","redirect","wrong ca","revision rollback"} {
 		t.Run(mode,func(t *testing.T){
 			var calls atomic.Int32
 			c,e:=proof.NewChallenge(scope,proof.Validate,hash,point,7,time.Now());if e!=nil{t.Fatal(e)}
@@ -54,8 +54,9 @@ func TestReferenceClientTrustBoundary(t *testing.T) {
 					_=json.NewEncoder(w).Encode(map[string]any{"version":"v2","request_id":"fixture","data":data});return
 				}
 				now:=time.Now().Unix()
-				claim:=proof.Credential{Scope:scope,License:id,Device:fp,KeyID:sha256.Sum256(pub),Revision:7,IssuedAt:now,ExpiresAt:now+300}
+				claim:=proof.Credential{Scope:scope,License:id,Device:fp,KeyID:sha256.Sum256(pub),Nonce:c.Nonce,Revision:7,IssuedAt:now,ExpiresAt:now+300}
 				switch mode {
+				case "wrong nonce":claim.Nonce=sha256.Sum256([]byte("previous challenge"))
 				case "wrong device":claim.Device=sha256.Sum256([]byte("other"))
 				case "wrong scope":claim.Scope.Deployment=sha256.Sum256([]byte("other"))
 				case "long ttl":claim.ExpiresAt++
@@ -66,7 +67,7 @@ func TestReferenceClientTrustBoundary(t *testing.T) {
 				body,_:=claim.Transcript()
 				_=json.NewEncoder(w).Encode(map[string]any{"version":"v2","request_id":"fixture","data":map[string]any{
 					"valid":true,"license_id":hex.EncodeToString(id[:]),"device":hex.EncodeToString(claim.Device[:]),
-					"key_id":hex.EncodeToString(claim.KeyID[:]),"deployment":hex.EncodeToString(claim.Scope.Deployment[:]),
+					"key_id":hex.EncodeToString(claim.KeyID[:]),"nonce":hex.EncodeToString(claim.Nonce[:]),"deployment":hex.EncodeToString(claim.Scope.Deployment[:]),
 					"product":claim.Scope.Product,"revision":claim.Revision,"issued_at":claim.IssuedAt,"expires_at":claim.ExpiresAt,
 					"license_expires_at":claim.LicenseExpiresAt,"transcript":hex.EncodeToString(body),"signature":hex.EncodeToString(signature)}})
 			}))

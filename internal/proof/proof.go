@@ -147,6 +147,7 @@ type Credential struct {
 	License LicenseID
 	Device Digest
 	KeyID Digest
+	Nonce Digest
 	Revision uint64
 	IssuedAt int64
 	ExpiresAt int64
@@ -155,7 +156,7 @@ type Credential struct {
 
 func (c Credential) Transcript() ([]byte,error) {
 	if !c.Scope.valid() || c.License == (LicenseID{}) || c.Device == (Digest{}) ||
-		c.KeyID == (Digest{}) || c.Revision == 0 || !validTime(c.IssuedAt) ||
+		c.KeyID == (Digest{}) || c.Nonce == (Digest{}) || c.Revision == 0 || !validTime(c.IssuedAt) ||
 		!validTime(c.ExpiresAt) || c.ExpiresAt <= c.IssuedAt ||
 		c.ExpiresAt-c.IssuedAt > int64(CredentialTTL/time.Second) ||
 		(c.LicenseExpiresAt != 0 && (!validTime(c.LicenseExpiresAt) || c.ExpiresAt > c.LicenseExpiresAt)) {
@@ -165,6 +166,7 @@ func (c Credential) Transcript() ([]byte,error) {
 	b = append(b,c.License[:]...)
 	b = append(b,c.Device[:]...)
 	b = append(b,c.KeyID[:]...)
+	b = append(b,c.Nonce[:]...)
 	b = binary.BigEndian.AppendUint64(b,c.Revision)
 	b = appendInt(b,c.IssuedAt)
 	b = appendInt(b,c.ExpiresAt)
@@ -188,7 +190,8 @@ func SignCredential(c Credential, private ed25519.PrivateKey) ([]byte,error) {
 // VerifyCredential requires a public key from a trusted local keyring, never
 // a public key supplied by the untrusted credential. Time must come from the
 // caller's trusted time policy; this primitive cannot prevent clock rollback.
-// A local verifier must also prove possession of the matching device key.
+// The online caller must compare Nonce to its outstanding challenge and
+// prove possession of the matching device key.
 func VerifyCredential(c Credential, scope Scope, license LicenseID, device Digest, trusted ed25519.PublicKey, signature []byte, now time.Time) error {
 	if len(trusted)!=ed25519.PublicKeySize || len(signature)!=ed25519.SignatureSize ||
 		c.Scope!=scope || c.License!=license || c.Device!=device ||

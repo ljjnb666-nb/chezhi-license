@@ -45,7 +45,7 @@ def challenge_bytes(scope, op, card, public, data):
 def credential_bytes(data):
     return (b"CHEZHI/CREDENTIAL/V2\0" + scope_bytes(data["deployment"], data["product"]) +
             bytes.fromhex(data["license_id"]) + bytes.fromhex(data["device"]) +
-            bytes.fromhex(data["key_id"]) + struct.pack(">Qqqq", data["revision"],
+            bytes.fromhex(data["key_id"]) + bytes.fromhex(data["nonce"]) + struct.pack(">Qqqq", data["revision"],
             data["issued_at"], data["expires_at"], data["license_expires_at"]))
 
 
@@ -83,6 +83,8 @@ def post(client, action, body, status=200, extra=None):
         assert "data" not in reply and "error" in reply
         return reply["error"]["code"]
     assert "error" not in reply
+    if action != "challenge":
+        assert reply["data"]["nonce"] == body["nonce"]
     return reply["data"]
 
 
@@ -214,11 +216,21 @@ def run_v2_suite(root, folder, binary, common, migration_env, runtime_env, passw
                 results=list(pool.map(activate,(a,b)))
             assert sorted(code for code,_ in results)==[200,403]
             credential=next(x["data"] for code,x in results if code==200)
+            assert credential["nonce"]==one["nonce"]
             verify(folder,credential,scope,p1,card,public_key)
             assert post(b,"activate",one,403)=="authorization_denied"
             assert post(a,"activate",prepare(b,scope,"activate",card,k2,p2),403)=="authorization_denied"
             current=post(b,"renew",prepare(a,scope,"renew",card,k1,p1))
             verify(folder,current,scope,p1,card,public_key)
+            # Simulate application-level loss of a committed response by
+            # discarding its result. Recovery must use a fresh challenge.
+            lost=prepare(a,scope,"validate",card,k1,p1)
+            post(b,"validate",lost)
+            assert post(a,"validate",lost,403)=="authorization_denied"
+            recovered=post(a,"validate",prepare(b,scope,"validate",card,k1,p1))
+            verify(folder,recovered,scope,p1,card,public_key)
+            assert recovered["nonce"]!=lost["nonce"] and recovered["revision"]==current["revision"]
+            assert recovered["license_expires_at"]==current["license_expires_at"]
             stale=prepare(a,scope,"validate",card,k1,p1)
             fields=dict(csrf=a.csrf("/?view=cards",cookie),id=credential["license_id"],action="unbind")
             assert b.form("/?view=cards",fields,cookie)[0]==200

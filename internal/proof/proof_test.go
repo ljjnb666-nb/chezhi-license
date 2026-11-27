@@ -100,7 +100,7 @@ func TestCredential(t *testing.T) {
 	if err!=nil { t.Fatal(err) }
 	scope:=Scope{filled(1),"chezhi1"}
 	now:=time.Unix(1700000000,0)
-	c:=Credential{Scope:scope,License:LicenseID{1},Device:filled(3),KeyID:sha256.Sum256(public),Revision:1,
+	c:=Credential{Scope:scope,License:LicenseID{1},Device:filled(3),KeyID:sha256.Sum256(public),Nonce:filled(8),Revision:1,
 		IssuedAt:now.Unix(),ExpiresAt:now.Add(CredentialTTL).Unix()}
 	sig,err:=SignCredential(c,private)
 	if err!=nil { t.Fatal(err) }
@@ -111,6 +111,7 @@ func TestCredential(t *testing.T) {
 	if verify(c,now.Add(CredentialTTL))==nil || verify(c,now.Add(-time.Second))==nil { t.Fatal("time boundary accepted") }
 	for _,mutate:=range []func(*Credential){
 		func(x *Credential){x.Revision++},
+		func(x *Credential){x.Nonce=filled(9)},
 		func(x *Credential){x.Device=filled(4)},
 		func(x *Credential){x.Scope.Product="other"},
 		func(x *Credential){x.License=LicenseID{2}},

@@ -130,6 +130,7 @@ func (w Web) licenseV2(rw http.ResponseWriter,r *http.Request) {
 	writeV2(rw,200,id,map[string]any{
 		"valid":true,"license_id":hex.EncodeToString(c.License[:]),
 		"device":hex.EncodeToString(c.Device[:]),"key_id":hex.EncodeToString(c.KeyID[:]),
+		"nonce":hex.EncodeToString(c.Nonce[:]),
 		"deployment":hex.EncodeToString(c.Scope.Deployment[:]),"product":c.Scope.Product,
 		"revision":c.Revision,"issued_at":c.IssuedAt,"expires_at":c.ExpiresAt,
 		"license_expires_at":c.LicenseExpiresAt,"transcript":hex.EncodeToString(transcript),

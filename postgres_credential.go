@@ -18,8 +18,7 @@ type signedCredential struct {
 
 // authorizeProof is the internal server-side authorization entry point.
 // Only a trusted server caller may select scope, TTL and signing key. It
-// deliberately has no HTTP exposure until deployment keyring policy is
-// implemented. Never return the provisional result if commit fails or is
+// is exposed only through the configured V2 HTTPS endpoint. Never return the provisional result if commit fails or is
 // uncertain. Signing failure rolls back both binding and nonce consumption.
 func (p *postgresStore) authorizeProof(ctx context.Context, nonce proof.Digest, scope proof.Scope,
 	op proof.Operation, cardHash proof.Digest, public, signature []byte,
@@ -53,7 +52,7 @@ func (p *postgresStore) authorizeProof(ctx context.Context, nonce proof.Digest, 
 			copy(licenseID[:], id)
 			claims := proof.Credential{
 				Scope: scope, License: licenseID, Device: c.Device,
-				KeyID: sha256.Sum256(private[ed25519.SeedSize:]),
+				KeyID: sha256.Sum256(private[ed25519.SeedSize:]), Nonce: c.Nonce,
 				Revision: epoch, IssuedAt: now.Unix(), ExpiresAt: now.Add(ttl).Unix(),
 			}
 			if card.Expires != nil {

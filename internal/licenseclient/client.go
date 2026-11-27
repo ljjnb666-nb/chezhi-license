@@ -143,6 +143,7 @@ type credentialReply struct {
 	License string `json:"license_id"`
 	Device string `json:"device"`
 	KeyID string `json:"key_id"`
+	Nonce string `json:"nonce"`
 	Deployment string `json:"deployment"`
 	Product string `json:"product"`
 	Revision uint64 `json:"revision"`
@@ -210,15 +211,15 @@ func (c *Client) Authorize(ctx context.Context,op proof.Operation,card string,ke
 	if proof.VerifyChallenge(ch,c.scope,op,hash,point,sig,now)!=nil { return empty,ErrInput }
 	raw,e=c.post(ctx,name,map[string]string{"key":card,"public_key":public,"nonce":cr.Nonce,"signature":hex.EncodeToString(sig)})
 	if e!=nil { return empty,e }
-	if _,e=exactObject(raw,"valid","license_id","device","key_id","deployment","product","revision","issued_at","expires_at","license_expires_at","transcript","signature");e!=nil { return empty,e }
+	if _,e=exactObject(raw,"valid","license_id","device","key_id","nonce","deployment","product","revision","issued_at","expires_at","license_expires_at","transcript","signature");e!=nil { return empty,e }
 	var rr credentialReply
 	keyID:=sha256.Sum256(c.trusted)
 	if json.Unmarshal(raw,&rr)!=nil || !rr.Valid || rr.License!=hex.EncodeToString(id[:]) ||
-		rr.Device!=hex.EncodeToString(fp[:]) || rr.KeyID!=hex.EncodeToString(keyID[:]) ||
+		rr.Device!=hex.EncodeToString(fp[:]) || rr.KeyID!=hex.EncodeToString(keyID[:]) || rr.Nonce!=cr.Nonce ||
 		rr.Deployment!=hex.EncodeToString(c.scope.Deployment[:]) || rr.Product!=c.scope.Product ||
 		rr.Issued<ch.IssuedAt || rr.Revision<ch.Epoch || rr.Revision>ch.Epoch+1 ||
 		(op!=proof.Activate && rr.Revision!=ch.Epoch) { return empty,ErrResponse }
-	claims:=proof.Credential{Scope:c.scope,License:id,Device:fp,KeyID:keyID,Revision:rr.Revision,
+	claims:=proof.Credential{Scope:c.scope,License:id,Device:fp,KeyID:keyID,Nonce:ch.Nonce,Revision:rr.Revision,
 		IssuedAt:rr.Issued,ExpiresAt:rr.Expires,LicenseExpiresAt:rr.LicenseExpires}
 	transcript,e=claims.Transcript()
 	if e!=nil || hex.EncodeToString(transcript)!=rr.Transcript ||
