@@ -78,6 +78,7 @@ type Challenge struct {
 	Nonce Digest
 	CardHash Digest
 	Device Digest
+	Epoch uint64
 	IssuedAt int64
 	ExpiresAt int64
 }
@@ -85,16 +86,16 @@ type Challenge struct {
 func (c Challenge) valid() bool {
 	return c.Scope.valid() && c.Operation >= Activate && c.Operation <= Renew &&
 		c.Nonce != (Digest{}) && c.CardHash != (Digest{}) && c.Device != (Digest{}) &&
-		validTime(c.IssuedAt) && validTime(c.ExpiresAt) && c.ExpiresAt > c.IssuedAt &&
+		c.Epoch > 0 && c.Epoch <= 1<<63-1 && validTime(c.IssuedAt) && validTime(c.ExpiresAt) && c.ExpiresAt > c.IssuedAt &&
 		c.ExpiresAt-c.IssuedAt <= int64(ChallengeTTL/time.Second)
 }
 
-func NewChallenge(scope Scope, op Operation, cardHash Digest, public []byte, now time.Time) (Challenge, error) {
+func NewChallenge(scope Scope, op Operation, cardHash Digest, public []byte, epoch uint64, now time.Time) (Challenge, error) {
 	_, device, err := DevicePublicKey(public)
 	if err != nil {
 		return Challenge{}, err
 	}
-	c := Challenge{Scope:scope, Operation:op, CardHash:cardHash, Device:device,
+	c := Challenge{Scope:scope, Operation:op, CardHash:cardHash, Device:device, Epoch:epoch,
 		IssuedAt:now.Unix(), ExpiresAt:now.Add(ChallengeTTL).Unix()}
 	if _, err := rand.Read(c.Nonce[:]); err != nil {
 		return Challenge{}, err
@@ -114,6 +115,7 @@ func (c Challenge) Transcript() ([]byte, error) {
 	b = append(b, c.Nonce[:]...)
 	b = append(b, c.CardHash[:]...)
 	b = append(b, c.Device[:]...)
+	b = binary.BigEndian.AppendUint64(b, c.Epoch)
 	b = appendInt(b, c.IssuedAt)
 	return appendInt(b,c.ExpiresAt), nil
 }
