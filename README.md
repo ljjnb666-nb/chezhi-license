@@ -1,3 +1,31 @@
+# CheZhi License · 澈知授权管理系统
+
+当前源码基线：**P2.1.7**。本项目是独立软件授权管理原型，仅限本机虚拟订单与授权演练，不包含校园网认证、真实收款或公网部署。
+
+## 快速开始
+
+需要 Go 1.23 或更高版本；推荐使用仍获安全维护的 Go 版本。克隆源码后，在 Windows PowerShell 中执行：
+
+```powershell
+New-Item -ItemType Directory -Force bin | Out-Null
+go build -trimpath -o bin/chezhi-license-win-x64.exe .
+.\start-windows.bat
+```
+
+打开终端提示的本机地址。首次启动使用临时管理员密码，可在账户与安全页面设置长期密码。用户激活页为 /activate，套餐页为 /purchase。停止旧实例后，备份并迁移 data 中的 state.json、plans.json、members.json、owner.json（如存在）；不要复制 instance.lock。源码仓库不包含可执行文件、运行数据或账户配置。
+
+## 持续集成
+
+[CI 工作流](.github/workflows/ci.yml) 覆盖 Go 回归（Linux 与 Windows）、Linux race、实际 HTTP、迁移与恢复、JavaScript 语法、Chromium 冒烟、Windows x64 构建和基础仓库敏感信息检查。PR 和 main 推送触发。构建产物仅供测试，非签名正式 Release；测试结果以对应 Actions 运行证据为准。基础敏感信息检查并非完整漏洞扫描。浏览器测试不替代 Windows Edge 实机与生产安全验收。
+
+最新审计范围与遗留问题见 [P2.1.7 审计](AUDIT-P2.1.7.md)。当前不支持生产 PostgreSQL、跨文件原子事务、真实设备持有证明、MFA 或公网安全部署。
+
+---
+
+## 历史版本记录
+
+下方保留历史记录，早期功能和验收状态不代表当前版本；冲突时以上方当前说明与最新审计为准。
+
 # CheZhi License P2.1.5 — 操作日志与业务恢复
 
 ## 本版变更

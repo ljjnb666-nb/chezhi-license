@@ -1,0 +1,6 @@
+# Preserve reproducible embedded web assets and source files across platforms.
+* text=auto eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.exe -text
+*.zip -text
