@@ -1,5 +1,5 @@
 """Browser smoke for local prototype. Requires Playwright and Chromium."""
-import subprocess, tempfile, signal, sys
+import os, subprocess, tempfile, signal, sys
 from pathlib import Path
 from playwright.sync_api import sync_playwright
 with tempfile.TemporaryDirectory() as d:
@@ -8,7 +8,7 @@ with tempfile.TemporaryDirectory() as d:
         lines=[p.stdout.readline() for _ in range(5)]
         url=lines[1].split('URL: ')[1].strip(); pw=lines[3].split('Password: ')[1].strip()
         with sync_playwright() as playwright:
-            browser=playwright.chromium.launch(executable_path='/usr/bin/chromium',args=['--no-sandbox'],headless=True)
+            browser=playwright.chromium.launch(executable_path=os.environ.get('CHEZHI_CHROMIUM_PATH') or None, headless=True)
             context=browser.new_context(viewport={'width':1440,'height':900})
             page=context.new_page(); errors=[]; page.on('pageerror',lambda e:errors.append(str(e)))
             r=page.goto(url+'login',timeout=10000); assert r.status==200
