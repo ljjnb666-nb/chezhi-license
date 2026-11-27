@@ -110,6 +110,20 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw 'CNG fixture cleanup failed' }
           }
       - if: runner.os == 'Windows'
+        name: Windows DPAPI enrollment transaction and crash recovery
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+          $src = (Resolve-Path -LiteralPath 'sdk/windows/WindowsDeviceKey.cs').Path
+          $enrollment = (Resolve-Path -LiteralPath 'sdk/windows/DeviceEnrollment.cs').Path
+          $test = (Resolve-Path -LiteralPath 'sdk/windows/EnrollmentSmoke.cs').Path
+          $exe = Join-Path $PWD 'bin\EnrollmentSmoke.exe'
+          & $csc /nologo /target:exe /platform:x64 /define:CHEZHI_SDK_TEST /r:System.Core.dll /r:System.Security.dll "/out:$exe" $src $enrollment $test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - if: runner.os == 'Windows'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: windows-x64-ci-build

@@ -102,3 +102,39 @@ P4.1 run 46004757745: 8/10; Windows DLL build and Go tests succeeded,
 this increment); PostgreSQL SDK integration passed. Benchmark failed on
 mixed workload with no successful issue, so the P5 capacity gate remains
 open and its assertions are unchanged.
+
+### Durable enrollment coordinator (CI pending)
+
+DeviceEnrollment stores one fixed current-user record in HKCU under
+Software\\CheZhiTech\\LicenseIdentity\\v1. Registry single-value replacement
+and Flush are used instead of a separate filesystem journal. The record
+contains only version, pending/ready state, selected provider, random slot
+GUID and SHA-256 public fingerprint, protected with DPAPI CurrentUser and
+domain-separated entropy including SID and registry path. No card or private
+key is stored there. Protected per-user/SYSTEM DACL and user ownership
+are checked; unexpected ACLs fail closed rather than being repaired.
+
+A SID/profile-specific Global mutex serializes cooperating processes,
+including separate sessions. Explicit EnrollFirst requires an absent record,
+writes and flushes pending before creating the CNG key, then writes and
+flushes ready with the fingerprint before returning. OpenExisting never
+creates a key or repairs missing, damaged, pending or mismatched data.
+An abandoned mutex alone does not authorize enrollment. Pending state is
+intentionally terminal until an operator reconciles it; no automatic key
+adoption, deletion, new identity or provider fallback. A crash after ready
+but before caller return can reopen the pinned key. If all registry metadata
+is deleted, normal startup still refuses; only an explicit first-enrollment
+action can create a new slot. P4.3 must not turn missing metadata into
+automatic enrollment or authorized recovery. Existing server binding
+cannot be bypassed by enrolling a different local key.
+
+DPAPI/DACL do not defend against a privileged administrator or malicious
+same-user code; registry flush is not a guarantee against disk/OS rollback.
+No remote attestation, hardware TPM, cross-user isolation test, real reboot
+or production migration policy is claimed. EnrollmentSmoke uses random
+test-only profiles, actual concurrent processes, tampered DPAPI data, missing
+CNG key and forced termination at both intent and key-created boundaries.
+Test hooks are conditional on CHEZHI_SDK_TEST; do not define for distribution.
+No campus-network-auth code is changed. CI 46005517973 did not run jobs:
+an accidental duplicate YAML section was removed in 476031a. The original
+Windows ABI/CNG tests still require actual execution.
