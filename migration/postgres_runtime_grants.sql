@@ -17,3 +17,4 @@ GRANT SELECT, INSERT, DELETE ON chezhi_challenges TO chezhi_runtime;
 GRANT SELECT, INSERT ON chezhi_secure_bindings TO chezhi_runtime;
 GRANT UPDATE (public_key, revision) ON chezhi_secure_bindings TO chezhi_runtime;
 GRANT UPDATE (auth_epoch) ON chezhi_cards TO chezhi_runtime;
+GRANT SELECT ON chezhi_signing_policy TO chezhi_runtime;
