@@ -44,8 +44,8 @@ func resetSecureBinding(ctx context.Context, tx *sql.Tx, id string) error {
 
 // lockSecureCard is an internal business primitive, not an exposed activation
 // endpoint. The caller must already have verified and consumed a challenge in
-// this transaction, and must fence the challenge against the authorization
-// revision before using this function. No credentials are issued here.
+// this transaction, and must use consumeProofChallenge, which fences the card epoch and holds
+// the same card lock before this function runs. No credentials are issued here.
 func lockSecureCard(ctx context.Context, tx *sql.Tx, cardHash proof.Digest, public []byte, activate bool) (Card, uint64, error) {
 	_, fingerprint, err := proof.DevicePublicKey(public)
 	if err != nil {
@@ -116,7 +116,7 @@ func lockSecureCard(ctx context.Context, tx *sql.Tx, cardHash proof.Digest, publ
 		}
 	}
 	c.Device = device
-	if err := dbExec(ctx, tx, "UPDATE chezhi_cards SET activated=$2,expires=$3,device=$4 WHERE id=$1",
+	if err := dbExec(ctx, tx, "UPDATE chezhi_cards SET activated=$2,expires=$3,device=$4,auth_epoch=auth_epoch+1 WHERE id=$1",
 		c.ID, sqlOptionalTime(c.Activated), sqlOptionalTime(c.Expires), c.Device); err != nil {
 		return Card{}, 0, err
 	}
