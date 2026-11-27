@@ -14,6 +14,7 @@ import subprocess
 import time
 import re
 from collections import Counter
+from threading import BoundedSemaphore
 from urllib.parse import urlsplit, urlunsplit
 
 from caddy_acceptance import caddy_proxy
@@ -156,11 +157,17 @@ def exercise_capacity(folder, a, b, diagnostics, query, scope, card, key, public
     before = snapshot()
     pool_before = metrics()
     clients = (a,b)
+    # The server intentionally admits only three simultaneous public
+    # handlers per instance. Keep one spare slot for response-finalization
+    # overlap. Worker concurrency is not the HTTP in-flight limit.
+    slots = (BoundedSemaphore(2),BoundedSemaphore(2))
     def worker(i):
         start = time.perf_counter()
-        proof = prepare(clients[i%2],scope,"renew",card,key,public)
+        with slots[i%2]:
+            proof = prepare(clients[i%2],scope,"renew",card,key,public)
         challenged = time.perf_counter()
-        data = post(clients[1-i%2],"renew",proof)
+        with slots[1-i%2]:
+            data = post(clients[1-i%2],"renew",proof)
         completed = time.perf_counter()
         return (data,(challenged-start)*1000,(completed-challenged)*1000,(completed-start)*1000)
     started = time.perf_counter()
@@ -178,14 +185,15 @@ def exercise_capacity(folder, a, b, diagnostics, query, scope, card, key, public
     assert snapshot()==before,"renewal changed binding or license lifecycle"
     for label,index in (("challenge_and_sign",1),("renew",2),("end_to_end",3)):
         samples=[x[index] for x in results]
-        print(f"V2_CAPACITY phase={label} clients=16 transactions=32 p50_ms={pctl(samples,50):.1f} "
+        print(f"V2_CAPACITY phase={label} workers=16 http_inflight_budget=4 transactions=32 p50_ms={pctl(samples,50):.1f} "
               f"p95_ms={pctl(samples,95):.1f} p99_ms={pctl(samples,99):.1f} max_ms={max(samples):.1f}",flush=True)
     print(f"V2_CAPACITY throughput={32/elapsed:.2f} transactions_per_second success=32 errors=0 "
           f"pool_before={pool_before} pool_after={metrics()}",flush=True)
     proof=prepare(a,scope,"renew",card,key,public)
     def duplicate(i):
-        code,headers,raw=clients[i%2].request("/api/v2/licenses/renew","POST",json.dumps(proof),
-                                               {"Content-Type":"application/json"})
+        with slots[i%2]:
+            code,headers,raw=clients[i%2].request("/api/v2/licenses/renew","POST",json.dumps(proof),
+                                                   {"Content-Type":"application/json"})
         reply=json.loads(raw)
         assert reply["version"]=="v2" and reply["request_id"]==headers["x-request-id"]
         if code==200:
