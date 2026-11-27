@@ -204,7 +204,7 @@ are subject to the existing shared licensing rate budget. Current tests use
 real TLS and PostgreSQL with an injected trusted request context; complete
 process-level and Caddy acceptance are still required.
 
-## V9 signing history and online reference client (CI pending)
+## V9 signing history and online reference client (CI 45994597676: 10/10 passed)
 
 V9 preserves public signing policy events in chezhi_signing_history.
 Initialization, rotation and logical recovery write an event in the same
@@ -238,6 +238,34 @@ Reference tests exercise adversarial responses and a TLS handler connected
 to real PostgreSQL. Complete process, Caddy, restore and recovery acceptance
 remain outstanding.
 
+## P3.8 process acceptance (tests added; CI pending)
+
+The standalone acceptance job now provisions a separate disposable secure
+database after the existing legacy and performance tests. Python independently
+encodes the fixed V7 challenge vector and both transcripts; OpenSSL generates
+fixture P-256 keys, signs device proofs and verifies Ed25519 credentials.
+The suite starts two actual HTTPS server processes, checks secure-only
+issuance, historical device migration after administrator unbind with unchanged
+activation/expiry, browser/V1 downgrade denial, wrong signatures, cross-operation
+and concurrent nonce reuse, foreign key rejection, renewal, unbind/rebind and
+revocation. It restores a real pg_dump archive with pending challenges,
+verifies new database refusal until offline recovery, checks preserved secure
+bindings and card rows, and confirms old challenges fail after scope reset.
+It also tests offline key rotation, refusal of retired keys and actual Caddy
+proxy authorization. These are test implementations, not passing evidence
+until the exact new CI completes. The legacy benchmark baseline is unchanged.
+
+Legacy JSON import must run with every runtime instance offline and before
+initializing a signing policy. This prevents loss of secure markers through
+the old format and serializes import with offline signer configuration.
+Historical cards already present in PostgreSQL retain the documented
+administrator-approved migration procedure.
+
+Latest V9 benchmark run reached five page medians <=500ms, but still had
+6/320 read 503s and 13/14 issue requests returned 503 under 100k mixed load.
+Keep the P5 capacity gate open; these results are not production capacity
+acceptance.
+
 ## Required integration work (not yet implemented)
 - Apply shared HTTP rate limits to challenge issuance, malformed and failed
   requests; avoid secrets and replayable material in logs.
@@ -250,8 +278,9 @@ remain outstanding.
   response, restore acceptance, Windows ACL verification and trusted distribution.
 - Verify ambiguous commit and response-loss recovery through fresh challenges
   and DB reconciliation in actual HTTP processes.
-- Reference client integration acceptance, cross-language vectors, real two-process
-  PostgreSQL HTTPS negative tests, restore and compatibility tests. P4 integrates
+- Complete CI verification of the newly added independent wire vector,
+  two-process HTTPS, Caddy, native restore and compatibility tests; then
+  close any audit findings. P4 integrates
   Windows protected storage and trustworthy time policy.
 - HTTP 503 classification and P5 capacity gates remain open.
 

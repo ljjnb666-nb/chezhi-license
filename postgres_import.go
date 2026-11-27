@@ -130,11 +130,17 @@ func (p *postgresStore) importLegacy(ctx context.Context, d legacyData) error {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 	return p.runTransaction(ctx, &sql.TxOptions{}, func(ctx context.Context, tx *sql.Tx) error {
+		var offline bool
+		if tx.QueryRowContext(ctx, "SELECT pg_try_advisory_xact_lock($1)", deploymentLock).Scan(&offline) != nil { return errDatabase }
+		if !offline { return errors.New("stop every instance before legacy import") }
+		policy, err := readSigningPolicy(ctx, tx)
+		if err != nil { return err }
+		if policy != nil { return errors.New("legacy import must precede signing policy initialization") }
 		if err := dbExec(ctx, tx, "SELECT pg_advisory_xact_lock(39184272002)"); err != nil {
 			return err
 		}
 		var fingerprint string
-		err := tx.QueryRowContext(ctx, "SELECT fingerprint FROM chezhi_import WHERE singleton").Scan(&fingerprint)
+		err = tx.QueryRowContext(ctx, "SELECT fingerprint FROM chezhi_import WHERE singleton").Scan(&fingerprint)
 		switch {
 		case err == nil && fingerprint == d.fingerprint:
 			return errors.New("this legacy snapshot was already imported")

@@ -167,6 +167,13 @@ def run_v2_suite(root, folder, binary, common, migration_env, runtime_env, passw
         cli(m,"db-set-mode",live,"server")
         cli(dict(m,CHEZHI_OWNER_PASSWORD_FILE=str(owner)),"db-owner-init")
         owner.unlink()
+        # Create a historical legacy-bound card before secure policy activation.
+        el,legacy,dl,_=endpoint(live,"")
+        with instance(binary,el,dl):
+            legacy_cookie=legacy.login("admin",password)
+            legacy_card=legacy.issue(legacy_cookie,"v2-legacy-order")
+            assert legacy_card
+            assert legacy.license("activate",legacy_card,"legacy-device")["data"]["valid"]
         signer,public_key = make_signer("v2-signing-"+suffix)
         cli(r,"db-set-signing-key",live,"none",public_key,success=False)
         cli(m,"db-set-signing-key",live,"none",public_key)
@@ -179,6 +186,14 @@ def run_v2_suite(root, folder, binary, common, migration_env, runtime_env, passw
         k2,p2 = device(folder,"device2-"+suffix)
         with instance(binary,ea,da),instance(binary,eb,db):
             cookie = a.login("admin",password)
+            legacy_before=query("SELECT activated,expires FROM chezhi_cards WHERE ref='v2-legacy-order'")
+            assert post(b,"activate",prepare(a,scope,"activate",legacy_card,k1,p1),403)=="authorization_denied"
+            legacy_id=card_hash(legacy_card)[:12].hex()
+            assert a.form("/?view=cards",dict(csrf=a.csrf("/?view=cards",cookie),id=legacy_id,action="unbind"),cookie)[0]==200
+            upgraded=post(b,"activate",prepare(a,scope,"activate",legacy_card,k1,p1))
+            verify(folder,upgraded,scope,p1,legacy_card,public_key)
+            assert query("SELECT activated,expires FROM chezhi_cards WHERE ref='v2-legacy-order'")==legacy_before
+            assert b.license("activate",legacy_card,"legacy-device")["data"]["status"]=="secure_protocol_required"
             card = a.issue(cookie,"v2-secure-order")
             assert card
             assert b.license("activate",card,"legacy")["data"]["status"]=="secure_protocol_required"
@@ -187,6 +202,8 @@ def run_v2_suite(root, folder, binary, common, migration_env, runtime_env, passw
             one = prepare(a,scope,"activate",card,k1,p1)
             # Cross-operation and concurrent same nonce: one successful commit.
             assert post(b,"validate",one,403)=="authorization_denied"
+            wrong=dict(one,signature=("00"*64))
+            assert post(b,"activate",wrong,403)=="authorization_denied"
             def activate(client):
                 code,headers,raw=client.request("/api/v2/licenses/activate","POST",json.dumps(one),
                                                 {"Content-Type":"application/json"})
@@ -220,7 +237,7 @@ def run_v2_suite(root, folder, binary, common, migration_env, runtime_env, passw
             assert post(a,"challenge",dict(key=card,public_key=p2,operation="validate"),403,
                         {"Origin":"https://example.invalid"})=="browser_origin_forbidden"
             assert post(a,"challenge",dict(key=card,public_key=p2,operation="validate",extra="x"),400)=="invalid_json"
-            assert query("SELECT count(*) FROM chezhi_secure_bindings")=="2"
+            assert query("SELECT count(*) FROM chezhi_secure_bindings")=="3"
             pg("pg_dump","-d",live,"-Fc","--no-owner","--no-acl","-f",dump)
             assert post(b,"validate",pending,200)["valid"]
         print("PASS V2 real two-process TLS, independent OpenSSL transcripts/signatures, atomic replay, foreign key denial, unbind/rebind, revoke and legacy downgrade",flush=True)
