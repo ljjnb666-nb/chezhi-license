@@ -1,0 +1,4 @@
+{
+    "column/chezhi_cards/auth_epoch": "[\"bigint\", true, \"\", \"1\"]",
+    "constraint/chezhi_cards/chezhi_cards_auth_epoch_check": "[true, \"CHECK ((auth_epoch > 0))\"]"
+}
