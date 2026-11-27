@@ -1,4 +1,4 @@
-import subprocess, tempfile, signal, sys, re, urllib.request, urllib.parse, urllib.error, http.cookiejar, zipfile, io, json, hashlib
+import os, subprocess, tempfile, signal, sys, re, urllib.request, urllib.parse, urllib.error, http.cookiejar, zipfile, io, json, hashlib
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parent/"migration"))
 from restore_backup import restore
@@ -44,7 +44,8 @@ with tempfile.TemporaryDirectory() as d:
         assert restore(source,restored)['cards']==1 and not (restored/'members.json').exists()
         with zipfile.ZipFile(source) as z:
             assert (restored/'state.json').read_bytes()==z.read('state.json') and (restored/'plans.json').read_bytes()==z.read('plans.json')
-        second=subprocess.Popen([sys.argv[1],str(restored)],stdout=subprocess.PIPE,text=True)
+        second=subprocess.Popen([sys.argv[1],str(restored)],stdout=subprocess.PIPE,text=True,
+                                env=dict(os.environ,CHEZHI_STORAGE="json"))
         try:
             newlines=[second.stdout.readline() for _ in range(5)];newurl=newlines[1].split('URL: ')[1].strip();newpw=newlines[3].split('Password: ')[1].strip()
             import base64

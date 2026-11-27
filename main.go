@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -61,6 +62,7 @@ type View struct {
 	Principal            Principal
 	Credential           string
 	OwnerConfigured      bool
+	SnapshotUnavailable  bool
 }
 
 func (w Web) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
@@ -160,14 +162,14 @@ func (w Web) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 				e = errors.New("confirm receipt / test before issuing")
 			}
 			if e == nil {
-				v.Keys, e = w.s.issue(d, n, a, f("channel"), f("sale_ref"), v.Principal.Name)
+				v.Keys, e = w.s.issueContext(r.Context(), d, n, a, f("channel"), f("sale_ref"), v.Principal.Name)
 			}
 			if e == nil {
 				v.Message = "已生成，请立即复制卡密。"
 			}
 		case "revoke", "unbind":
 			v.Section = "cards"
-			e = w.s.change(f("id"), f("action"), v.Principal.Name)
+			e = w.s.changeContext(r.Context(), []string{f("id")}, f("action"), v.Principal.Name)
 			if e == nil {
 				v.Message = "操作完成"
 			}
@@ -176,23 +178,23 @@ func (w Web) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 			if f("confirm_batch") != "yes" {
 				e = errors.New("请确认批量操作")
 			} else {
-				e = w.s.changeBatch(r.PostForm["ids"], strings.TrimPrefix(f("action"), "batch-"), v.Principal.Name)
+				e = w.s.changeContext(r.Context(), r.PostForm["ids"], strings.TrimPrefix(f("action"), "batch-"), v.Principal.Name)
 			}
 			if e == nil {
 				v.Message = "批量操作完成"
 			}
 		case "plans":
 			v.Section = "plans"
-			e = w.s.savePlans(r.PostForm)
+			e = w.s.savePlansContext(r.Context(), r.PostForm, v.Principal.Name)
 			if e == nil {
 				v.Message = "套餐设置已保存"
-				if w.s.recordAudit(v.Principal.Name, "plans_config", "") != nil {
+				if w.s.pg == nil && w.s.recordAudit(v.Principal.Name, "plans_config", "") != nil {
 					v.Error = "套餐已保存，但操作日志写入失败，请检查数据目录。"
 				}
 			}
 		case "qq":
 			v.Section = "settings"
-			e = w.s.setQQ(f("qq"), v.Principal.Name)
+			e = w.s.setQQContext(r.Context(), f("qq"), v.Principal.Name)
 			if e == nil {
 				v.Message = "客服配置已保存"
 			}
@@ -207,11 +209,19 @@ func (w Web) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 		http.Error(rw, "method not allowed", 405)
 		return
 	}
-	snapshot := w.s.snapshot()
-	v.Plans = w.s.catalog()
-	v.Dashboard = buildDashboard(snapshot, v.Now, r.URL.Query())
-	v.Operations = buildOperations(snapshot, v.Now, v.Section, r.URL.Query())
+	snapshot, plans, err := w.s.readView(r.Context(), true)
 	rw.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err != nil {
+		// Acknowledged writes and their one-time response survive the read failure.
+		v.SnapshotUnavailable = true
+		if v.Message == "" {
+			rw.WriteHeader(http.StatusServiceUnavailable)
+		}
+	} else {
+		v.Plans = plans
+		v.Dashboard = buildDashboard(snapshot, v.Now, r.URL.Query())
+		v.Operations = buildOperations(snapshot, v.Now, v.Section, r.URL.Query())
+	}
 	if e := page.Execute(rw, v); e != nil {
 		log.Print("render failed")
 	}
@@ -229,7 +239,12 @@ func (w Web) activationCSRF() string {
 type ActivationView struct{ QQ, CSRF, Message, Error, Expiry string }
 
 func (w Web) activate(rw http.ResponseWriter, r *http.Request) {
-	v := ActivationView{QQ: w.s.snapshot().QQ, CSRF: w.activationCSRF()}
+	state, _, err := w.s.readView(r.Context(), false)
+	if err != nil {
+		http.Error(rw, "service unavailable", 503)
+		return
+	}
+	v := ActivationView{QQ: state.QQ, CSRF: w.activationCSRF()}
 	if r.Method == http.MethodPost {
 		r.Body = http.MaxBytesReader(rw, r.Body, 8192)
 		if err := parseScalarForm(r); err != nil {
@@ -245,7 +260,7 @@ func (w Web) activate(rw http.ResponseWriter, r *http.Request) {
 			http.Error(rw, "操作过于频繁，请稍后重试", 429)
 			return
 		}
-		res, err := w.s.validate(r.PostForm.Get("key"), r.PostForm.Get("device"))
+		res, err := w.s.validateContext(r.Context(), r.PostForm.Get("key"), r.PostForm.Get("device"))
 		if err != nil {
 			v.Error = "授权服务暂不可用"
 		} else if !res.Valid {
@@ -268,53 +283,141 @@ func (w Web) activate(rw http.ResponseWriter, r *http.Request) {
 	}
 }
 func main() {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := run(ctx, os.Args[1:]); err != nil {
+		log.Fatal(err)
+	}
+}
+func run(ctx context.Context, args []string) error {
+	if len(args) > 0 {
+		switch args[0] {
+		case "db-init", "db-check", "db-import":
+			return databaseCommand(ctx, args)
+		}
+	}
+	backend := os.Getenv("CHEZHI_STORAGE")
+	var s *Store
+	switch backend {
+	case "postgres":
+		p, err := openPostgres(ctx, os.Getenv("CHEZHI_DATABASE_URL"))
+		if err != nil {
+			return err
+		}
+		defer p.db.Close()
+		if err = p.checkSchema(ctx); err != nil {
+			return err
+		}
+		s = &Store{pg: p, now: time.Now}
+	case "", "json":
+		var release func()
+		var err error
+		s, release, err = openLocalRuntime(args)
+		if err != nil {
+			return err
+		}
+		defer release()
+	default:
+		return errors.New("CHEZHI_STORAGE must be json or postgres")
+	}
+	return serve(ctx, s)
+}
+func openLocalRuntime(args []string) (*Store, func(), error) {
 	dir := "data"
-	if len(os.Args) > 1 {
-		dir = os.Args[1]
+	if len(args) > 0 {
+		dir = args[0]
 	}
 	if e := os.MkdirAll(dir, 0700); e != nil {
-		log.Fatal(e)
+		return nil, nil, e
 	}
-	lock := filepath.Join(dir, "instance.lock")
-	f, e := os.OpenFile(lock, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	lock, e := lockLocalDirectory(dir)
 	if e != nil {
-		log.Fatal("data directory locked; stop previous instance first")
+		return nil, nil, e
 	}
-	f.Close()
-	defer os.Remove(lock)
 	s, e := openStore(filepath.Join(dir, "state.json"))
 	if e != nil {
-		log.Print("cannot load state: ", e)
-		return
+		lock.release()
+		return nil, nil, fmt.Errorf("cannot load state: %w", e)
 	}
+	return s, lock.release, nil
+}
+
+type localDirectoryLock struct {
+	path     string
+	file     *os.File
+	identity os.FileInfo
+}
+
+// The exclusive-create sentinel is also honored by the P2.1.7 JSON server.
+func lockLocalDirectory(dir string) (*localDirectoryLock, error) {
+	path := filepath.Join(dir, "instance.lock")
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return nil, errors.New("data directory locked; stop previous instance first")
+		}
+		return nil, errors.New("cannot acquire data directory lock")
+	}
+	identity, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, errors.New("cannot verify data directory lock ownership")
+	}
+	return &localDirectoryLock{path: path, file: f, identity: identity}, nil
+}
+
+func (l *localDirectoryLock) owned() bool {
+	current, err := os.Lstat(l.path)
+	return err == nil && os.SameFile(l.identity, current)
+}
+
+func (l *localDirectoryLock) release() {
+	// Hold the handle while comparing file identities, then close before
+	// unlinking for Windows. Only the holder removes the sentinel.
+	owned := l.owned()
+	l.file.Close()
+	if owned {
+		_ = os.Remove(l.path)
+	}
+}
+
+func serve(ctx context.Context, s *Store) error {
 	ln, e := net.Listen("tcp4", "127.0.0.1:0")
 	if e != nil {
-		log.Print(e)
-		return
+		return e
 	}
 	host := ln.Addr().String()
 	token := randomToken()
 	gateway := newAdminGateway(Web{s, token, randomToken(), host})
 	if gateway.loadErr != nil {
 		ln.Close()
-		log.Print("cannot load account configuration: ", gateway.loadErr)
-		return
+		return fmt.Errorf("cannot load account configuration: %w", gateway.loadErr)
 	}
 	displayPassword := token
 	if gateway.owner != nil {
 		displayPassword = "(configured; use your saved password)"
 	}
 	srv := &http.Server{Handler: gateway, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 15 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 8192}
-	fmt.Printf("CheZhi License P2.1.7\nURL: http://%s/\nUser: admin\nPassword: %s\nLocal-only; close with Ctrl+C.\n", host, displayPassword)
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer stop()
+	fmt.Printf("CheZhi License P2.2\nURL: http://%s/\nUser: admin\nPassword: %s\nLocal-only; close with Ctrl+C.\n", host, displayPassword)
+	done := make(chan struct{})
+	shutdown := make(chan struct{})
 	go func() {
-		<-ctx.Done()
-		c, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		srv.Shutdown(c)
+		defer close(shutdown)
+		select {
+		case <-done:
+		case <-ctx.Done():
+			c, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if srv.Shutdown(c) != nil {
+				_ = srv.Close()
+			}
+		}
 	}()
-	if e = srv.Serve(ln); e != nil && !errors.Is(e, http.ErrServerClosed) {
-		log.Print(strings.TrimSpace(e.Error()))
+	e = srv.Serve(ln)
+	close(done)
+	<-shutdown
+	if errors.Is(e, http.ErrServerClosed) {
+		return nil
 	}
+	return e
 }

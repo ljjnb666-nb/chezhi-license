@@ -17,3 +17,15 @@ state.json
 plans.json
 members.json
 owner.json
+
+/backups/
+*.dump
+*.pgdump
+*.backup
+*.bak
+*.sql.gz
+*.dump.gz
+*.pgdump.gz
+.pgpass
+pgpass.conf
+pg_service.conf

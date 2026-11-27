@@ -10,6 +10,9 @@ on:
 permissions:
   contents: read
 
+env:
+  GOTOOLCHAIN: local
+
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -26,9 +29,9 @@ jobs:
           - os: ubuntu-24.04
             go: '1.23.x'
           - os: ubuntu-24.04
-            go: '1.26.x'
+            go: '1.26.11'
           - os: windows-2025
-            go: '1.26.x'
+            go: '1.26.11'
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -68,7 +71,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5
         with:
-          go-version: '1.26.x'
+          go-version: '1.26.11'
           cache: false
       - name: Build and run live HTTP tests
         shell: bash
@@ -101,17 +104,19 @@ jobs:
           python3 - <<'PY'
           import pathlib, re, subprocess, sys
           paths = subprocess.check_output(['git', 'ls-files', '-z']).decode().split('\x00')
-          forbidden = {'state.json', 'plans.json', 'members.json', 'owner.json', 'instance.lock'}
-          extensions = {'.exe', '.db', '.sqlite', '.sqlite3', '.zip', '.log', '.jsonl', '.pem', '.key', '.p12', '.pfx'}
+          forbidden = {'state.json', 'plans.json', 'members.json', 'owner.json', 'instance.lock', '.pgpass', 'pgpass.conf', 'pg_service.conf'}
+          extensions = {'.exe', '.db', '.sqlite', '.sqlite3', '.zip', '.log', '.jsonl', '.pem', '.key', '.p12', '.pfx', '.dump', '.pgdump', '.backup', '.bak'}
           patterns = [r'-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----', r'gh[pousr]_[A-Za-z0-9]{30,}', r'github_pat_[A-Za-z0-9_]{40,}', r'AKIA[A-Z0-9]{16}']
           bad = []
           for name in filter(None, paths):
               p = pathlib.Path(name)
-              if p.parts[0] in {'data', 'bin'} or p.name in forbidden or p.suffix.lower() in extensions or (p.name.startswith('.env') and p.name != '.env.example'):
+              if p.parts[0].lower() in {'data', 'bin', 'backups'} or p.name.lower() in forbidden or p.suffix.lower() in extensions or p.name.lower().endswith(('.sql.gz', '.dump.gz', '.pgdump.gz')) or (p.name.lower().startswith('.env') and p.name != '.env.example'):
                   bad.append((name, 'runtime or secret file'))
               if p.as_posix() == '.github/workflows/ci.yml':
                   continue  # scanner contains its own pattern definitions
               raw = p.read_bytes()
+              if raw.startswith(b'PGDMP') or b'-- PostgreSQL database dump' in raw[:1024]:
+                  bad.append((name, 'PostgreSQL dump content'))
               if any(re.search(pattern, raw.decode('utf-8', errors='replace')) for pattern in patterns):
                   bad.append((name, 'possible credential'))
           for name, reason in bad:
@@ -120,6 +125,36 @@ jobs:
               sys.exit(1)
           print('Repository hygiene checks passed; not a comprehensive secret or vulnerability scan.')
           PY
+
+  dependency-security:
+    name: Dependency and toolchain security
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5
+        with:
+          go-version: '1.26.11'
+          cache: false
+      - name: Verify modules and scan the shipping toolchain
+        env:
+          CGO_ENABLED: '0'
+        run: |
+          set -euo pipefail
+          mkdir -p bin
+          go version | tee bin/security-verification.txt
+          go mod download
+          go mod verify | tee -a bin/security-verification.txt
+          go run golang.org/x/vuln/cmd/govulncheck@v1.10.0 ./... | tee -a bin/security-verification.txt
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: dependency-security
+          path: bin/security-verification.txt
+          retention-days: 7
+          if-no-files-found: warn
 
   browser:
     name: Chromium browser smoke
@@ -131,7 +166,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5
         with:
-          go-version: '1.26.x'
+          go-version: '1.26.11'
           cache: false
       - name: Prepare browser test environment
         run: |
@@ -143,3 +178,52 @@ jobs:
           mkdir -p bin
           CGO_ENABLED=0 go build -trimpath -o bin/chezhi-license-linux-amd64 .
           timeout 180s .ci-venv/bin/python browser_e2e.py ./bin/chezhi-license-linux-amd64
+
+  postgres:
+    name: PostgreSQL persistence and HTTP
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17.10-alpine@sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193
+        env:
+          POSTGRES_DB: chezhi
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: ci_ephemeral_only
+        ports:
+          - 5432/tcp
+        options: >-
+          --health-cmd "pg_isready -U postgres -d chezhi"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5
+        with:
+          go-version: '1.26.11'
+          cache: false
+      - name: Real database integration with race detector
+        env:
+          CHEZHI_TEST_DATABASE_URL: postgres://postgres:ci_ephemeral_only@127.0.0.1:${{ job.services.postgres.ports[5432] }}/chezhi?sslmode=disable
+        run: |
+          set -euo pipefail
+          mkdir -p bin
+          go test -race -run '^TestPostgres' -count=1 -v ./... | tee bin/postgres-test.txt
+      - name: Database commands, HTTP and native backup recovery
+        env:
+          CHEZHI_TEST_DATABASE_URL: postgres://postgres:ci_ephemeral_only@127.0.0.1:${{ job.services.postgres.ports[5432] }}/chezhi?sslmode=disable
+          CHEZHI_TEST_POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
+        run: |
+          set -euo pipefail
+          CGO_ENABLED=0 go build -trimpath -o bin/chezhi-license .
+          python3 migration/postgres_acceptance.py ./bin/chezhi-license | tee bin/postgres-acceptance.txt
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: postgres-acceptance
+          path: bin/postgres-*.txt
+          retention-days: 7
+          if-no-files-found: warn

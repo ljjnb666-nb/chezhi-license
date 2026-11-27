@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -23,26 +24,44 @@ type adminSession struct {
 	expiry     time.Time
 	csrf       string
 	name, role string
+	revision   int64
 }
 type adminGateway struct {
-	w        Web
-	mu       sync.Mutex
-	dispatch sync.Mutex
-	sessions map[string]adminSession
-	attempts []time.Time
-	members  map[string]Member
-	loadErr  error
-	owner    *ownerCredential
-	now      func() time.Time
+	w               Web
+	mu              sync.Mutex
+	dispatch        sync.Mutex
+	sessions        map[string]adminSession
+	attempts        []time.Time
+	members         map[string]Member
+	loadErr         error
+	accountRevision int64
+	revisions       map[string]int64
+	owner           *ownerCredential
+	now             func() time.Time
 }
 
 func newAdminGateway(w Web) *adminGateway {
 	g := &adminGateway{w: w, sessions: map[string]adminSession{}, members: map[string]Member{}, now: time.Now}
+	if w.s.pg != nil {
+		g.loadErr = g.refreshAccounts(context.Background())
+		return g
+	}
 	g.loadErr = g.loadMembers()
 	if g.loadErr == nil {
 		g.loadErr = g.loadOwner()
 	}
 	return g
+}
+func (g *adminGateway) refreshAccounts(ctx context.Context) error {
+	a, err := g.w.s.pg.accounts(ctx)
+	if err != nil {
+		return err
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.members, g.owner, g.accountRevision, g.revisions = a.members, a.owner, a.revision, a.revisions
+	g.pruneSessions(g.now())
+	return nil
 }
 func (g *adminGateway) loginToken() string {
 	h := hmac.New(sha256.New, []byte(g.w.csrf))
@@ -54,6 +73,20 @@ func (g *adminGateway) renderLogin(rw http.ResponseWriter, status int, msg strin
 	rw.WriteHeader(status)
 	_ = loginPage.Execute(rw, struct{ CSRF, Error string }{g.loginToken(), msg})
 }
+
+// Session map and account revisions are read together under g.mu.
+func (g *adminGateway) sessionActive(s adminSession, now time.Time) bool {
+	return now.Before(s.expiry) && s.revision == g.revisions[s.name]
+}
+
+func (g *adminGateway) pruneSessions(now time.Time) {
+	for id, s := range g.sessions {
+		if !g.sessionActive(s, now) {
+			delete(g.sessions, id)
+		}
+	}
+}
+
 func (g *adminGateway) session(r *http.Request) (string, adminSession, bool) {
 	c, e := r.Cookie(sessionCookie)
 	if e != nil || len(c.Value) != 64 {
@@ -62,7 +95,7 @@ func (g *adminGateway) session(r *http.Request) (string, adminSession, bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	s, ok := g.sessions[c.Value]
-	if !ok || !g.now().Before(s.expiry) {
+	if !ok || !g.sessionActive(s, g.now()) {
 		delete(g.sessions, c.Value)
 		return "", adminSession{}, false
 	}
@@ -106,6 +139,13 @@ func (g *adminGateway) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 	// Serialize admin request authorization and mutation with role/session changes.
 	g.dispatch.Lock()
 	defer g.dispatch.Unlock()
+	if g.w.s.pg != nil {
+		if err := g.refreshAccounts(r.Context()); err != nil {
+			http.Error(rw, "账户配置无法读取", 503)
+			return
+		}
+		r = r.WithContext(context.WithValue(r.Context(), accountRevisionKey{}, g.accountRevision))
+	}
 	id, s, ok := g.session(r)
 	if r.URL.Path == "/login" {
 		if r.Method == http.MethodGet {
@@ -134,18 +174,14 @@ func (g *adminGateway) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 		name := r.PostForm.Get("username")
 		role, valid := g.authenticate(name, r.PostForm.Get("password"))
 		if !valid {
-			g.securityAudit("unknown", "login_failed")
+			g.securityAuditContext(r.Context(), "unknown", "login_failed")
 			g.renderLogin(rw, 401, "账号或密码不正确。")
 			return
 		}
 		sid := randomToken()
 		now := g.now()
 		g.mu.Lock()
-		for k, v := range g.sessions {
-			if !now.Before(v.expiry) {
-				delete(g.sessions, k)
-			}
-		}
+		g.pruneSessions(now)
 		if len(g.sessions) >= 32 && !ok {
 			g.mu.Unlock()
 			g.renderLogin(rw, 429, "会话数量已达上限，请退出其他会话。")
@@ -161,12 +197,12 @@ func (g *adminGateway) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		if !g.securityAudit(name, "login_success") {
+		if !g.securityAuditContext(r.Context(), name, "login_success") {
 			g.mu.Unlock()
 			g.renderLogin(rw, 503, "安全日志无法写入，请检查数据目录。")
 			return
 		}
-		g.sessions[sid] = adminSession{expiry: now.Add(8 * time.Hour), csrf: randomToken(), name: name, role: role}
+		g.sessions[sid] = adminSession{expiry: now.Add(8 * time.Hour), csrf: randomToken(), name: name, role: role, revision: g.revisions[name]}
 		g.mu.Unlock()
 		http.SetCookie(rw, &http.Cookie{Name: sessionCookie, Value: sid, Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, MaxAge: 28800})
 		http.Redirect(rw, r, "/", 303)
@@ -198,7 +234,7 @@ func (g *adminGateway) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/logout-all" {
 			action = "logout_all"
 		}
-		g.securityAudit(s.name, action)
+		g.securityAuditContext(r.Context(), s.name, action)
 		http.SetCookie(rw, &http.Cookie{Name: sessionCookie, Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, MaxAge: -1})
 		http.Redirect(rw, r, "/login", 303)
 		return

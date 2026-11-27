@@ -1,9 +1,11 @@
 package main
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/subtle"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -49,6 +51,10 @@ func (g *adminGateway) loadOwner() error {
 	if e != nil {
 		return e
 	}
+	return g.applyOwner(b)
+}
+
+func (g *adminGateway) applyOwner(b []byte) error {
 	var c ownerCredential
 	if len(b) > 4096 || uniqueJSON(b) != nil || json.Unmarshal(b, &c) != nil {
 		return errors.New("invalid owner credential")
@@ -73,9 +79,23 @@ func (g *adminGateway) verifyOwner(password string) bool {
 	return subtle.ConstantTimeCompare(deriveOwner(password, salt, ownerRounds), digest) == 1
 }
 func (g *adminGateway) saveOwner(password string) error {
+	return g.saveOwnerContext(context.Background(), password)
+}
+func (g *adminGateway) saveOwnerContext(ctx context.Context, password string) error {
 	saltHex := randomToken()
 	salt, _ := hex.DecodeString(saltHex)
 	c := ownerCredential{1, saltHex, hex.EncodeToString(deriveOwner(password, salt, ownerRounds))}
+	if g.w.s.pg != nil {
+		revision, err := g.w.s.pg.changeAccount(ctx, Audit{At: g.w.s.now().UTC(), Action: "password_changed", Actor: "admin"},
+			func(ctx context.Context, tx *sql.Tx, revision int64) error { return writeOwner(ctx, tx, c, revision) })
+		if err != nil {
+			return err
+		}
+		g.owner = &c
+		g.accountRevision = revision
+		g.revisions["admin"] = revision
+		return nil
+	}
 	b, e := json.Marshal(c)
 	if e != nil {
 		return e
@@ -103,7 +123,10 @@ func (g *adminGateway) saveOwner(password string) error {
 	return nil
 }
 func (g *adminGateway) securityAudit(actor, action string) bool {
-	if e := g.w.s.recordAudit(actor, action, ""); e != nil {
+	return g.securityAuditContext(context.Background(), actor, action)
+}
+func (g *adminGateway) securityAuditContext(ctx context.Context, actor, action string) bool {
+	if e := g.w.s.auditContext(ctx, actor, action, ""); e != nil {
 		log.Print("security audit write failed: ", action)
 		return false
 	}
@@ -140,7 +163,7 @@ func (g *adminGateway) handleOwnerPassword(rw http.ResponseWriter, r *http.Reque
 		return
 	}
 	if !g.verifyOwner(r.PostForm.Get("current_password")) {
-		g.securityAudit("admin", "password_failed")
+		g.securityAuditContext(r.Context(), "admin", "password_failed")
 		render("当前密码不正确。")
 		return
 	}
@@ -148,7 +171,7 @@ func (g *adminGateway) handleOwnerPassword(rw http.ResponseWriter, r *http.Reque
 		render("新密码不能与当前密码相同。")
 		return
 	}
-	if e := g.saveOwner(p); e != nil {
+	if e := g.saveOwnerContext(r.Context(), p); e != nil {
 		render("密码保存失败，请检查数据目录。")
 		return
 	}
@@ -160,7 +183,7 @@ func (g *adminGateway) handleOwnerPassword(rw http.ResponseWriter, r *http.Reque
 	}
 	g.mu.Unlock()
 	http.SetCookie(rw, &http.Cookie{Name: sessionCookie, Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, MaxAge: -1})
-	if !g.securityAudit("admin", "password_changed") {
+	if g.w.s.pg == nil && !g.securityAudit("admin", "password_changed") {
 		g.renderLogin(rw, 200, "密码已更新，请使用新密码登录。安全日志写入失败，请检查数据目录。")
 		return
 	}

@@ -1,7 +1,17 @@
 """Real HTTP and process restart test for owner credential lifecycle."""
-import base64, http.cookiejar, json, re, signal, subprocess, sys, tempfile, urllib.error, urllib.parse, urllib.request
+import base64, http.cookiejar, json, os, re, signal, subprocess, sys, tempfile, urllib.error, urllib.parse, urllib.request
 from pathlib import Path
+from urllib.parse import urlsplit
 binary=str(Path(sys.argv[1]).resolve())
+postgres = os.environ.get("CHEZHI_STORAGE") == "postgres"
+
+def read_postgres(statement):
+    admin = urlsplit(os.environ["CHEZHI_TEST_DATABASE_URL"]).username
+    database = urlsplit(os.environ["CHEZHI_DATABASE_URL"]).path.lstrip("/")
+    return subprocess.check_output([
+        "docker", "exec", os.environ["CHEZHI_TEST_POSTGRES_CONTAINER"],
+        "psql", "-U", admin, "-d", database, "-qAt", "-v", "ON_ERROR_STOP=1", "-c", statement,
+    ], text=True, timeout=15).strip()
 with tempfile.TemporaryDirectory() as directory:
     def start():
         p=subprocess.Popen([binary,directory],stdout=subprocess.PIPE,text=True)
@@ -27,7 +37,14 @@ with tempfile.TemporaryDirectory() as directory:
         f={'csrf':token,'current_password':temp,'new_password':permanent,'confirm_password':permanent}
         assert req(a,url,'account/password',f)[1].endswith('/login')
         assert req(b,url)[1].endswith('/login') and login(b,url,temp)[0]==401 and login(b,url,permanent)[0]==200
-        raw=(Path(directory)/'owner.json').read_text();assert permanent not in raw and temp not in raw
+        if postgres:
+            raw = read_postgres("SELECT row_to_json(o) FROM chezhi_owner o")
+            owner = json.loads(raw)
+            assert owner["version"] == 1 and len(owner["salt"]) == len(owner["digest"]) == 64
+            assert not (Path(directory)/"owner.json").exists()
+        else:
+            raw=(Path(directory)/'owner.json').read_text()
+        assert permanent not in raw and temp not in raw
         print('PASS owner password configuration, two-session revocation and old credential rejection')
     finally:stop(p)
     p,url,display=start()
@@ -36,7 +53,12 @@ with tempfile.TemporaryDirectory() as directory:
         c=browser();assert login(c,url,permanent)[0]==200
         assert req(browser(),url,headers={'Accept':'application/json','Authorization':'Basic '+base64.b64encode(('admin:'+temp).encode()).decode()})[0]==401
         print('PASS restarted process authenticates persisted credential, no bootstrap disclosure or Basic Auth bypass')
-        audit=json.loads((Path(directory)/'state.json').read_text())['Audit'];events={x['Action'] for x in audit}
+        if postgres:
+            audit = json.loads(read_postgres("SELECT json_agg(json_build_object('Action', action, 'Actor', actor, 'Target', target)) FROM chezhi_audit"))
+            assert not (Path(directory)/"state.json").exists()
+        else:
+            audit=json.loads((Path(directory)/'state.json').read_text())['Audit']
+        events={x['Action'] for x in audit}
         assert {'login_success','login_failed','password_changed'}<=events
         assert all(permanent not in json.dumps(x) and temp not in json.dumps(x) for x in audit)
         print('PASS persistent security audit without credentials')

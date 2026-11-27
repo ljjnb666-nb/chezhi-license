@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -49,6 +50,11 @@ func (s *Store) loadPlans() error {
 	if e != nil {
 		return e
 	}
+	return s.applyPlans(b)
+}
+
+func (s *Store) applyPlans(b []byte) error {
+	var e error
 	var saved []Plan
 	if e = uniqueJSON(b); e != nil {
 		return e
@@ -68,8 +74,9 @@ func (s *Store) loadPlans() error {
 	return nil
 }
 func (s *Store) savePlans(f url.Values) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	return s.savePlansContext(context.Background(), f, "")
+}
+func (s *Store) savePlansContext(ctx context.Context, f url.Values, actor string) error {
 	next := defaultPlans()
 	for i := range next {
 		p := &next[i]
@@ -91,6 +98,11 @@ func (s *Store) savePlans(f url.Values) error {
 		}
 		p.Visible = vis == "yes"
 	}
+	if s.pg != nil {
+		return s.pg.savePlans(ctx, next, Audit{At: s.now().UTC(), Action: "plans_config", Actor: actor})
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	b, e := json.MarshalIndent(next, "", "  ")
 	if e != nil {
 		return e

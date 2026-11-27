@@ -1,3 +1,4 @@
+from contextlib import closing
 import copy, hashlib, json, sqlite3, tempfile, unittest
 from pathlib import Path
 from rehearse import rehearse, InvalidState, rows_from
@@ -16,7 +17,7 @@ class MigrationTests(unittest.TestCase):
     def test_roundtrip(self):
         self.save(); before=self.src.read_bytes(); r=rehearse(self.src,self.dest)
         self.assertEqual((r['cards'],r['audit']),(1,3)); self.assertFalse(r['production_migrated']); self.assertEqual(before,self.src.read_bytes())
-        with sqlite3.connect(self.dest) as c:
+        with closing(sqlite3.connect(self.dest)) as c, c:
             self.assertEqual(c.execute('select expires,revoked from staged_cards').fetchone(),('2026-02-01T00:00:00.123456789Z',1))
     def test_empty(self): self.state={'QQ':'----------','Cards':None,'Audit':None}; self.save(); self.assertEqual(rehearse(self.src,self.dest)['cards'],0)
     def test_no_overwrite(self):
@@ -36,7 +37,7 @@ class MigrationTests(unittest.TestCase):
         c=copy.deepcopy(self.state['Cards'][0]); c.update(hash='b'*64,id='b'*24,amount_cents=2); self.state['Cards'].append(c); self.reject()
     def test_db_constraints(self):
         self.save(); rehearse(self.src,self.dest)
-        with sqlite3.connect(self.dest) as c:
+        with closing(sqlite3.connect(self.dest)) as c, c:
             c.execute('pragma foreign_keys=on')
             with self.assertRaises(sqlite3.IntegrityError): c.execute('update staged_cards set days=-1')
             with self.assertRaises(sqlite3.IntegrityError): c.execute("insert into staged_audit values (9,'x','bind','bad',NULL,NULL)")
