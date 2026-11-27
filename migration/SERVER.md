@@ -234,7 +234,10 @@ before revisiting that choice.
 The standalone CI now includes a bounded V2 workload on a disposable
 PostgreSQL database and two real HTTPS instances. Sixteen worker threads
 perform 32 signed renewals of one already-bound synthetic card, obtaining
-the challenge on one instance and completing it on the other. Every
+the challenge on one instance and completing it on the other. Each instance
+has a three-handler public admission limit; the workload uses two permits
+per instance (four total), leaving headroom for response finalization.
+Worker concurrency is not simultaneous HTTP concurrency. Every
 credential is checked independently with OpenSSL; the card and binding
 snapshots must stay unchanged. A separate eight-way duplicate-proof race
 must yield one success and seven denials. Public request metrics must
@@ -243,9 +246,11 @@ account for all 73 HTTP requests (37/36 per instance), with zero additional
 workloads. Normal production limits are not modified.
 
 The output reports challenge-plus-client-signing, renewal and end-to-end
-P50/P95/P99/max, throughput and pool state. It includes fresh TLS
-connections and local OpenSSL process startup; the values are not pure
-server processing latency. Independent response verification is outside
+P50/P95/P99/max, throughput and pool state. It includes worker queue
+waiting, fresh TLS connections and local OpenSSL process startup; the values
+are not pure server processing latency. V2_RECOVERY_TIMING reports native
+dump duration, target creation/restore duration and elapsed time through
+verified recovery (including trust reconfiguration and credential checks). Independent response verification is outside
 the timed workload. Same-card contention is deliberate; this is a short
 functional capacity regression, not a production peak-load or sustained
 load claim. The existing 10,000/100,000-card dashboard benchmark and
