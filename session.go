@@ -128,7 +128,7 @@ func (g *adminGateway) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 		http.Error(rw, "invalid host", 400)
 		return
 	}
-	if strings.HasPrefix(r.URL.Path, "/api/v1/") || r.URL.Path == "/api/v1" {
+	if isV2Path(r.URL.Path) || strings.HasPrefix(r.URL.Path, "/api/v1/") || r.URL.Path == "/api/v1" {
 		g.w.ServeHTTP(rw, r)
 		return
 	}
