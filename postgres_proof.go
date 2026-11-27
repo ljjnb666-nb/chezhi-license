@@ -49,7 +49,12 @@ func (p *postgresStore) issueProofChallenge(ctx context.Context, scope proof.Sco
 		if count >= challengeCapacity {
 			return errChallengeCapacity
 		}
-		challenge, err = proof.NewChallenge(scope, op, card, public, now)
+		epoch, err := lockCardEpoch(ctx, tx, card)
+		if err != nil { return err }
+		// Refresh after waiting for the card row.
+		now, err = databaseProofTime(ctx, tx)
+		if err != nil { return err }
+		challenge, err = proof.NewChallenge(scope, op, card, public, epoch, now)
 		if err != nil {
 			return errChallengeInvalid
 		}
@@ -118,6 +123,13 @@ func (p *postgresStore) consumeProofChallenge(ctx context.Context, nonce proof.D
 		if proof.VerifyChallenge(c, scope, op, card, public, signature, now) != nil {
 			return errChallengeInvalid
 		}
+		epoch, err := lockCardEpoch(ctx, tx, card)
+		if err != nil { return err }
+		if epoch != c.Epoch { return errChallengeInvalid }
+		// The card lock may have blocked beyond the challenge lifetime.
+		now, err = databaseProofTime(ctx, tx)
+		if err != nil { return err }
+		if now.Unix() < c.IssuedAt || now.Unix() >= c.ExpiresAt { return errChallengeInvalid }
 		return apply(ctx, tx, c)
 	})
 }
@@ -145,4 +157,14 @@ func verifyStoredChallenges(ctx context.Context, tx *sql.Tx) error {
 		return errDatabase
 	}
 	return nil
+}
+
+// Lock ordering: challenge row first, then card row. Administrative changes
+// lock cards only; they never delete challenges while holding a card lock.
+func lockCardEpoch(ctx context.Context, tx *sql.Tx, hash proof.Digest) (uint64, error) {
+	var epoch int64
+	err := tx.QueryRowContext(ctx, "SELECT auth_epoch FROM chezhi_cards WHERE hash=$1 FOR UPDATE", hex.EncodeToString(hash[:])).Scan(&epoch)
+	if errors.Is(err, sql.ErrNoRows) { return 0, errChallengeInvalid }
+	if err != nil || epoch <= 0 { return 0, errDatabase }
+	return uint64(epoch), nil
 }
