@@ -464,3 +464,38 @@ jobs:
             bin/performance/plans/*.json
           retention-days: 14
           if-no-files-found: warn
+
+  termux-staging:
+    name: Android ARM64 build and Termux staging preflight
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5
+        with:
+          go-version: '1.26.11'
+          cache: false
+      - name: Syntax, cross-build and unsigned candidate evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n migration/termux/staging.sh
+          mkdir -p bin/termux-staging/migration/termux
+          CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build -trimpath -o bin/termux-staging/chezhi-server-android-arm64 .
+          readelf -h bin/termux-staging/chezhi-server-android-arm64 | grep -E 'Machine:.*AArch64'
+          go version -m bin/termux-staging/chezhi-server-android-arm64 | tee bin/termux-staging/build-info.txt
+          grep -F 'GOOS=android' bin/termux-staging/build-info.txt
+          grep -F 'GOARCH=arm64' bin/termux-staging/build-info.txt
+          cp migration/termux/staging.sh migration/termux/README.md bin/termux-staging/migration/termux/
+          cp migration/postgres_runtime_grants.sql bin/termux-staging/migration/
+          git rev-parse HEAD > bin/termux-staging/source-commit.txt
+          printf '%s\n' 'UNSIGNED ANDROID STAGING CANDIDATE: build only; no phone or PostgreSQL 18 acceptance' > bin/termux-staging/NOTICE
+          (cd bin/termux-staging && sha256sum chezhi-server-android-arm64 migration/termux/staging.sh migration/termux/README.md migration/postgres_runtime_grants.sql source-commit.txt build-info.txt NOTICE > SHA256SUMS && sha256sum -c SHA256SUMS)
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: termux-android-arm64-unsigned-staging
+          path: bin/termux-staging/
+          if-no-files-found: error
+          retention-days: 14
