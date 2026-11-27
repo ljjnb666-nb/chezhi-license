@@ -5,6 +5,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/tls"
+	"database/sql"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -427,6 +428,9 @@ func (h *serverRouter) diagnostics(w http.ResponseWriter, r *http.Request) {
 
 func serveIndependent(ctx context.Context, c serverConfig, p *postgresStore) error {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, nil)))
+	if err := p.transaction(ctx, &sql.TxOptions{ReadOnly: true}, verifyRuntimeRole); err != nil {
+		return errors.New("standalone server requires the restricted PostgreSQL runtime grants; run db-check --runtime")
+	}
 	listener, err := net.Listen("tcp", c.listen)
 	if err != nil {
 		return errors.New("cannot open configured listener")

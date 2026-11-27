@@ -22,8 +22,8 @@ Run `db-check --runtime` with the restricted credentials from
 [migration/postgres_runtime_grants.sql](postgres_runtime_grants.sql).
 Apply those grants again when upgrading an existing database to schema
 version 3. These deep checks are part of deployment and recovery
-acceptance. Startup and readiness only check version, connection and the
-minimum resources needed to accept traffic.
+acceptance. Startup checks the restricted grants and configured owner. Readiness checks
+version, connection and the minimum resources needed to accept traffic.
 
 ## Configuration
 

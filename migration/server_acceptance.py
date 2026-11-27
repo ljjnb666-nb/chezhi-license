@@ -380,6 +380,11 @@ def main():
             sql(None, stdin=grants)
             runtime_env = dict(os.environ, CHEZHI_DATABASE_URL=dsn(role), CHEZHI_OWNER_PASSWORD_FILE=str(owner_file))
             cli(runtime_env, "db-owner-init", success=False)
+            missing_port=port()
+            missing_host=f"127.0.0.1:{missing_port}"
+            no_owner=cli(dict(runtime_env,CHEZHI_MODE="test",CHEZHI_LISTEN=missing_host,
+                              CHEZHI_PUBLIC_ORIGIN="http://"+missing_host,CHEZHI_CSRF_KEY_FILE=str(secret)),success=False)
+            assert "configured owner credential" in no_owner.stderr
             cli(migration_env, "db-owner-init")
             cli(migration_env, "db-owner-init", success=False)
             cli(migration_env, "db-check", "--migrator")
@@ -397,6 +402,8 @@ def main():
             da, db = Client(da_port, f"127.0.0.1:{da_port}"), Client(db_port, f"127.0.0.1:{db_port}")
             env_a = dict(common, CHEZHI_LISTEN=f"127.0.0.1:{first_port}", CHEZHI_DIAGNOSTICS=f"127.0.0.1:{da_port}")
             env_b = dict(common, CHEZHI_LISTEN=f"127.0.0.1:{other_port}", CHEZHI_DIAGNOSTICS=f"127.0.0.1:{db_port}")
+            excessive=cli(dict(env_a,CHEZHI_DATABASE_URL=dsn()),success=False)
+            assert "restricted PostgreSQL runtime grants" in excessive.stderr
             for invalid in ({"CHEZHI_STORAGE": "json"}, {"CHEZHI_TLS_KEY": ""}, {"CHEZHI_PUBLIC_ORIGIN": "http://" + host},
                             {"CHEZHI_CSRF_KEY_FILE": ""}, {"CHEZHI_DIAGNOSTICS": "0.0.0.0:9090"},
                             {"CHEZHI_MODE": "test", "CHEZHI_LISTEN": "0.0.0.0:8443"}):

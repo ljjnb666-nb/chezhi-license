@@ -184,7 +184,7 @@ func verifyRuntimeRole(ctx context.Context, tx *sql.Tx) error {
         )
         SELECT NOT EXISTS (
             SELECT 1 FROM expected e, LATERAL (SELECT to_regclass('public.' || e.rel) AS oid) c
-            WHERE has_table_privilege(c.oid,'SELECT') <> e.can_select
+            WHERE c.oid IS NULL OR has_table_privilege(c.oid,'SELECT') <> e.can_select
                OR has_table_privilege(c.oid,'INSERT') <> e.can_insert
                OR has_table_privilege(c.oid,'DELETE') <> e.can_delete
                OR has_table_privilege(c.oid,'TRUNCATE,TRIGGER,REFERENCES,MAINTAIN')
