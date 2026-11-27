@@ -310,7 +310,10 @@ func run(ctx context.Context, args []string) error {
 				return errors.New("unexpected health probe arguments")
 			}
 			return probeReadiness(ctx)
-		case "db-init", "db-check", "db-import", "db-owner-init", "db-set-mode", "db-recover-security":
+		case "license-key-generate":
+			if len(args) != 2 { return errors.New("usage: license-key-generate <new-protected-file>") }
+			return generateSigningKey(args[1])
+		case "db-init", "db-check", "db-import", "db-owner-init", "db-set-mode", "db-recover-security", "db-set-signing-key":
 			return databaseCommand(ctx, args)
 		}
 	}
