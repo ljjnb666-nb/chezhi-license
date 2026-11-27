@@ -1,0 +1,12 @@
+{
+    "table/chezhi_challenges": "[\"r\", \"p\", false]",
+    "column/chezhi_challenges/nonce": "[\"text\", true, \"\", null]",
+    "column/chezhi_challenges/payload": "[\"bytea\", true, \"\", null]",
+    "column/chezhi_challenges/expires": "[\"bigint\", true, \"\", null]",
+    "constraint/chezhi_challenges/chezhi_challenges_pkey": "[true, \"PRIMARY KEY (nonce)\"]",
+    "constraint/chezhi_challenges/chezhi_challenges_nonce_check": "[true, \"CHECK ((nonce ~ '^[0-9a-f]{64}$'::text))\"]",
+    "constraint/chezhi_challenges/chezhi_challenges_payload_check": "[true, \"CHECK ((octet_length(payload) <= 4096))\"]",
+    "constraint/chezhi_challenges/chezhi_challenges_expires_check": "[true, \"CHECK ((expires > 0))\"]",
+    "index/chezhi_challenges/chezhi_challenges_pkey": "[true, true, true, \"CREATE UNIQUE INDEX chezhi_challenges_pkey ON public.chezhi_challenges USING btree (nonce)\"]",
+    "index/chezhi_challenges/chezhi_challenges_expiry_idx": "[true, true, true, \"CREATE INDEX chezhi_challenges_expiry_idx ON public.chezhi_challenges USING btree (expires)\"]"
+}
