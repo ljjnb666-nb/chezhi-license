@@ -21,7 +21,7 @@ for binary encodings. All requests share the licensing source/global budget.
    over SHA-256 of challenge transcript). Operation must match the challenge.
    Successful activation binds a previously unbound card; validation and
    renewal require the existing public-key binding.
-   Result: valid=true, license_id, device, key_id, deployment, product,
+   Result: valid=true, license_id, device, key_id, nonce, deployment, product,
    revision, issued_at, expires_at, license_expires_at (0 for perpetual),
    transcript and signature (Ed25519 hex).
 
@@ -31,7 +31,10 @@ is success only if the entire expected response verifies. 400 invalid input,
 405 method_not_allowed, 413 body_too_large, 415 json_required,
 429 rate_limited, 503 busy/unavailable. Observe Retry-After and bounded
 backoff. Obtain a fresh challenge after uncertain delivery; do not reuse
-a consumed nonce.
+a consumed nonce. Retain the same device key. For uncertain first activation,
+a fresh activation with the same key is safe; do not generate a replacement
+key or reset the original activation time. A failed response does not establish
+that the database transaction failed.
 
 Clients MUST reconstruct the transcripts from independently expected scope,
 operation, card hash, public-key fingerprint and server-provided nonce/time
@@ -39,7 +42,10 @@ and epoch. Compare to supplied transcript exactly before signing; do not
 blindly sign opaque server bytes. Verify credential transcript and claims
 against locally provisioned trusted public key, scope and device identity,
 not a trust root learned from an untrusted response. Check time, product,
-license ID and revision. The current credential lifetime is at most five
+license ID and revision. The signed credential includes the consumed challenge
+nonce immediately after the key ID in the binary transcript; it must exactly
+match this request's outstanding nonce. Earlier development credentials without
+this field are not accepted. The current credential lifetime is at most five
 minutes and never later than finite card expiry. Online-first is the
 provisional policy; offline authorization is not yet approved. Key rotation
 and logical recovery change scope; secure distribution of new trust settings

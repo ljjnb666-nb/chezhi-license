@@ -59,7 +59,8 @@ Credential transcript:
 - ASCII CHEZHI/CREDENTIAL/V2 followed by NUL.
 - Deployment and product as above.
 - 12-byte license ID, 32-byte device fingerprint, 32-byte signing-key ID
-  (SHA-256 of raw Ed25519 public key), 8-byte positive authorization revision.
+  (SHA-256 of raw Ed25519 public key), 32-byte nonce of the consumed challenge,
+  8-byte positive authorization revision.
 - 8-byte issue time, 8-byte credential expiry, 8-byte license expiry (0
   for perpetual). Credential lifetime <=24 hours and no later than the
   finite license expiry (conservative floor to whole seconds).
@@ -68,7 +69,7 @@ Credential transcript:
 The verifier takes the expected scope, license and device, and a public key
 from a trusted keyring. Untrusted credentials cannot choose their own trust
 root. Signature validation is not proof of current authorization: the
-caller must establish device-key possession and use trusted time. An offline
+caller must establish device-key possession, match the outstanding nonce and use trusted time. An offline
 credential cannot learn about a revocation before renewal or expiry. The
 24h ceiling is provisional, pending product policy; default to online
 verification until the full policy and P4 storage/time boundary are validated.
@@ -232,13 +233,15 @@ and a preprovisioned deployment scope and Ed25519 key. It checks the expected
 card ID, device, product, lifetime and challenge-relative authorization revision.
 It does not persist keys or cards, cache offline authorization or implement
 a trustworthy clock, monotonic persisted revision or a Windows SDK.
-The current response is authenticated by TLS and the server signature;
-the credential itself is not signed over the individual challenge nonce.
+The P3.8 revision includes the consumed challenge nonce in the signed
+credential and requires an exact nonce match in the online reference client.
+Pre-revision development credentials are intentionally incompatible; no
+production SDK or deployment has been released.
 Reference tests exercise adversarial responses and a TLS handler connected
 to real PostgreSQL. Complete process, Caddy, restore and recovery acceptance
 remain outstanding.
 
-## P3.8 process acceptance (tests added; CI pending)
+## P3.8 process acceptance (initial run passed; final hardening CI pending)
 
 The standalone acceptance job now provisions a separate disposable secure
 database after the existing legacy and performance tests. Python independently
@@ -252,8 +255,16 @@ revocation. It restores a real pg_dump archive with pending challenges,
 verifies new database refusal until offline recovery, checks preserved secure
 bindings and card rows, and confirms old challenges fail after scope reset.
 It also tests offline key rotation, refusal of retired keys and actual Caddy
-proxy authorization. These are test implementations, not passing evidence
-until the exact new CI completes. The legacy benchmark baseline is unchanged.
+proxy authorization. Run 45995574798 passed all four new V2 process acceptance groups and
+PostgreSQL tests. The only failed job was Chromium setup, caused by a 403
+from the unrelated Microsoft APT feed before the browser tests ran. The
+final hardening revision temporarily isolates the dedicated Microsoft feed
+on the ephemeral runner while installing signed Ubuntu dependencies, without
+skipping browser tests or disabling signature checks. It also adds signed
+nonce binding, a validly signed wrong-nonce response rejection fixture and
+application-level discarded-response recovery with a fresh challenge. The
+latter is not a wire-level disconnect or unknown-COMMIT fault injection.
+The exact final revision still needs CI verification. The legacy benchmark baseline is unchanged.
 
 Legacy JSON import must run with every runtime instance offline and before
 initializing a signing policy. This prevents loss of secure markers through

@@ -52,7 +52,7 @@ func TestPostgresCommittedCredential(t *testing.T) {
 	issued,err:=peer.authorizeProof(ctx,c.Nonce,scope,proof.Activate,hash,public,sig,private,time.Minute)
 	if err!=nil { t.Fatal(err) }
 	card=pgSnapshot(t,s).Cards[0]
-	if card.Expires==nil || issued.Claims.Revision!=c.Epoch+1 || issued.Claims.LicenseExpiresAt!=card.Expires.Unix() ||
+	if card.Expires==nil || issued.Claims.Nonce!=c.Nonce || issued.Claims.Revision!=c.Epoch+1 || issued.Claims.LicenseExpiresAt!=card.Expires.Unix() ||
 		issued.Claims.ExpiresAt-issued.Claims.IssuedAt!=60 {
 		t.Fatal("wrong confirmed claims")
 	}
