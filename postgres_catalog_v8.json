@@ -1,0 +1,11 @@
+{
+    "table/chezhi_signing_policy": "[\"r\", \"p\", false]",
+    "column/chezhi_signing_policy/singleton": "[\"boolean\", true, \"\", \"true\"]",
+    "column/chezhi_signing_policy/deployment": "[\"text\", true, \"\", null]",
+    "column/chezhi_signing_policy/public_key": "[\"text\", true, \"\", null]",
+    "constraint/chezhi_signing_policy/chezhi_signing_policy_pkey": "[true, \"PRIMARY KEY (singleton)\"]",
+    "constraint/chezhi_signing_policy/chezhi_signing_policy_singleton_check": "[true, \"CHECK (singleton)\"]",
+    "constraint/chezhi_signing_policy/chezhi_signing_policy_deployment_check": "[true, \"CHECK ((deployment ~ '^[0-9a-f]{64}$'::text))\"]",
+    "constraint/chezhi_signing_policy/chezhi_signing_policy_public_key_check": "[true, \"CHECK ((public_key ~ '^[0-9a-f]{64}$'::text))\"]",
+    "index/chezhi_signing_policy/chezhi_signing_policy_pkey": "[true, true, true, \"CREATE UNIQUE INDEX chezhi_signing_policy_pkey ON public.chezhi_signing_policy USING btree (singleton)\"]"
+}
