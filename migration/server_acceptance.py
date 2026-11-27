@@ -605,7 +605,7 @@ def main():
             cli(migration_env, "db-init")
             grants = (root / "migration/postgres_runtime_grants.sql").read_text().replace("chezhi_runtime", role)
             if baseline:
-                grants="\n".join(line for line in grants.splitlines() if "chezhi_deployment" not in line and "chezhi_challenges" not in line)
+                grants="\n".join(line for line in grants.splitlines() if "chezhi_deployment" not in line and "chezhi_challenges" not in line and "chezhi_secure_bindings" not in line)
             sql(None, stdin=grants)
             runtime_env = dict(os.environ, CHEZHI_DATABASE_URL=dsn(role), CHEZHI_OWNER_PASSWORD_FILE=str(owner_file))
             cli(runtime_env, "db-owner-init", success=False)
