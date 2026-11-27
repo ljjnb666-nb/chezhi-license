@@ -20,10 +20,10 @@ done
 for variable in $(compgen -v PG); do unset "$variable"; done
 export PGPASSFILE="$root/pgpass"
 migrate() {
-    env -u CHEZHI_DATABASE_URL CHEZHI_DATABASE_URL_FILE="$root/migration-url" "$bin" "$@"
+    env -i PATH="$PATH" HOME="$HOME" CHEZHI_DATABASE_URL_FILE="$root/migration-url" "$bin" "$@"
 }
 runtime() {
-    env -u CHEZHI_DATABASE_URL CHEZHI_DATABASE_URL_FILE="$root/runtime-url" "$bin" "$@"
+    env -i PATH="$PATH" HOME="$HOME" CHEZHI_DATABASE_URL_FILE="$root/runtime-url" "$bin" "$@"
 }
 sql() { psql -X -w -h 127.0.0.1 -p "$port" -U chezhi_migrator -v ON_ERROR_STOP=1 "$@"; }
 db_start() {
@@ -39,6 +39,7 @@ configured() {
     [ -d "$root" ] && [ ! -L "$root" ] && [ -f "$root/initialized" ] && [ ! -L "$root/initialized" ] || die 'Not initialized; do not reuse an incomplete directory.'
     [ "$(stat -c %a "$root")" = 700 ] || die 'Private staging directory must have mode 700.'
 }
+[ "$#" -ge 1 ] || die "Usage: init <binary> <SHA256> | run | status | stop-db | trust-info | backup"
 case "$1" in
     init)
         [ "$#" -eq 3 ] || die 'Usage: init <reviewed ARM64 binary> <expected SHA256>'
@@ -70,11 +71,13 @@ case "$1" in
         migrate db-init
         sql -d chezhi -f "$here/../postgres_runtime_grants.sql"
         migrate db-set-mode chezhi server
+        [ -t 0 ] || die "Use an interactive terminal for the supervisor password."
         read -r -s -p 'New supervisor password (14-128 UTF-8 bytes): ' owner
         printf '\n'
         printf '%s' "$owner" > "$root/owner-once"
         unset owner
-        CHEZHI_OWNER_PASSWORD_FILE="$root/owner-once" migrate db-owner-init
+        env -i PATH="$PATH" HOME="$HOME" CHEZHI_DATABASE_URL_FILE="$root/migration-url" \
+            CHEZHI_OWNER_PASSWORD_FILE="$root/owner-once" "$bin" db-owner-init
         rm -f -- "$root/owner-once"
         public="$(migrate license-key-generate "$root/signing-key" | awk 'END {print $NF}')"
         [[ "$public" =~ ^[0-9a-f]{64}$ ]] || die 'Unexpected public signing key output.'
@@ -96,7 +99,7 @@ case "$1" in
         exec 9>"$root/service.lock"
         flock -n 9 || die 'Another managed service operation is active.'
         [ "$(sha256sum "$bin" | cut -d ' ' -f1)" = "$(cat "$root/binary-sha256")" ] || die 'Binary changed.'
-        db_start
+        db_start 9>&-
         runtime db-check --runtime
         # Foreground process; use Ctrl-C to stop. Database remains up until stop-db.
         exec env -i PATH="$PATH" HOME="$HOME" \
@@ -115,7 +118,7 @@ case "$1" in
         configured
         exec 9>"$root/service.lock"
         flock -n 9 || die 'Stop the foreground server first (Ctrl-C).'
-        db_stop
+        db_stop 9>&-
         ;;
     trust-info)
         configured
