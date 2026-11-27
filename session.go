@@ -60,6 +60,7 @@ func (g *adminGateway) refreshAccounts(ctx context.Context) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.members, g.owner, g.accountRevision, g.revisions = a.members, a.owner, a.revision, a.revisions
+	g.pruneSessions(g.now())
 	return nil
 }
 func (g *adminGateway) loginToken() string {
@@ -72,6 +73,20 @@ func (g *adminGateway) renderLogin(rw http.ResponseWriter, status int, msg strin
 	rw.WriteHeader(status)
 	_ = loginPage.Execute(rw, struct{ CSRF, Error string }{g.loginToken(), msg})
 }
+
+// Session map and account revisions are read together under g.mu.
+func (g *adminGateway) sessionActive(s adminSession, now time.Time) bool {
+	return now.Before(s.expiry) && s.revision == g.revisions[s.name]
+}
+
+func (g *adminGateway) pruneSessions(now time.Time) {
+	for id, s := range g.sessions {
+		if !g.sessionActive(s, now) {
+			delete(g.sessions, id)
+		}
+	}
+}
+
 func (g *adminGateway) session(r *http.Request) (string, adminSession, bool) {
 	c, e := r.Cookie(sessionCookie)
 	if e != nil || len(c.Value) != 64 {
@@ -80,7 +95,7 @@ func (g *adminGateway) session(r *http.Request) (string, adminSession, bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	s, ok := g.sessions[c.Value]
-	if !ok || !g.now().Before(s.expiry) || s.revision != g.revisions[s.name] {
+	if !ok || !g.sessionActive(s, g.now()) {
 		delete(g.sessions, c.Value)
 		return "", adminSession{}, false
 	}
@@ -166,11 +181,7 @@ func (g *adminGateway) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 		sid := randomToken()
 		now := g.now()
 		g.mu.Lock()
-		for k, v := range g.sessions {
-			if !now.Before(v.expiry) {
-				delete(g.sessions, k)
-			}
-		}
+		g.pruneSessions(now)
 		if len(g.sessions) >= 32 && !ok {
 			g.mu.Unlock()
 			g.renderLogin(rw, 429, "会话数量已达上限，请退出其他会话。")

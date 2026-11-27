@@ -57,6 +57,11 @@ func (g *adminGateway) loadMembers() error {
 	if e != nil {
 		return e
 	}
+	return g.applyMembers(b)
+}
+
+func (g *adminGateway) applyMembers(b []byte) error {
+	var e error
 	var list []Member
 	if e = uniqueJSON(b); e != nil {
 		return e

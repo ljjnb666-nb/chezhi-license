@@ -1,7 +1,7 @@
 name: chezhi-license-pg
 services:
   postgres:
-    image: postgres:17.10-alpine
+    image: postgres:17.10-alpine@sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193
     environment:
       POSTGRES_DB: chezhi
       POSTGRES_USER: chezhi_migrator

@@ -21,6 +21,8 @@ var postgresV2 string
 
 var postgresMigrations = []string{postgresV1, postgresV2}
 
+var errCommitUnknown = errors.New("database commit result unknown")
+
 var errDatabase = errors.New("database operation failed")
 var errOrderExists = errors.New("sale reference already issued")
 var errAccountChanged = errors.New("account configuration changed; retry")
@@ -76,6 +78,11 @@ func (p *postgresStore) runTransaction(ctx context.Context, opts *sql.TxOptions,
 		return err
 	}
 	if err := tx.Commit(); err != nil {
+		var server *pq.Error
+		if (opts == nil || !opts.ReadOnly) &&
+			(!errors.As(err, &server) || server.Code.Class() == "08" || server.Code == "40003" || server.Severity == "FATAL") {
+			return errCommitUnknown
+		}
 		return errDatabase
 	}
 	return nil

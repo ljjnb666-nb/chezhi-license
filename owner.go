@@ -51,6 +51,10 @@ func (g *adminGateway) loadOwner() error {
 	if e != nil {
 		return e
 	}
+	return g.applyOwner(b)
+}
+
+func (g *adminGateway) applyOwner(b []byte) error {
 	var c ownerCredential
 	if len(b) > 4096 || uniqueJSON(b) != nil || json.Unmarshal(b, &c) != nil {
 		return errors.New("invalid owner credential")

@@ -20,51 +20,68 @@ type legacyData struct {
 	members     map[string]Member
 	owner       *ownerCredential
 	fingerprint string
+	sourceDir   string
+	sourceLock  *localDirectoryLock
 }
 
-func legacyFingerprint(dir string) (string, error) {
+func readLegacyFiles(dir string) (map[string][]byte, string, error) {
 	hash := sha256.New()
-	files := 0
+	files := map[string][]byte{}
 	for _, name := range []string{"state.json", "plans.json", "members.json", "owner.json"} {
 		b, err := os.ReadFile(filepath.Join(dir, name))
 		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
 		if err != nil {
-			return "", fmt.Errorf("cannot read %s", name)
+			return nil, "", fmt.Errorf("cannot read %s", name)
 		}
 		if !utf8.Valid(b) {
-			return "", fmt.Errorf("%s contains invalid UTF-8", name)
+			return nil, "", fmt.Errorf("%s contains invalid UTF-8", name)
 		}
-		files++
+		files[name] = b
 		sum := sha256.Sum256(b)
 		fmt.Fprintf(hash, "%s:%x\n", name, sum)
 	}
-	if files == 0 {
-		return "", errors.New("no legacy JSON files found")
+	if len(files) == 0 {
+		return nil, "", errors.New("no legacy JSON files found")
 	}
-	return hex.EncodeToString(hash.Sum(nil)), nil
+	return files, hex.EncodeToString(hash.Sum(nil)), nil
 }
+
+func legacyFingerprint(dir string) (string, error) {
+	_, fingerprint, err := readLegacyFiles(dir)
+	return fingerprint, err
+}
+
+func requireStoppedLegacy(dir string) error {
+	if _, err := os.Lstat(filepath.Join(dir, "instance.lock")); !errors.Is(err, os.ErrNotExist) {
+		return errors.New("legacy source must be stopped and accessible")
+	}
+	return nil
+}
+
 func loadLegacy(dir string) (legacyData, error) {
 	var d legacyData
-	if _, err := os.Stat(filepath.Join(dir, "instance.lock")); !errors.Is(err, os.ErrNotExist) {
-		return d, errors.New("legacy source must be stopped and accessible")
-	}
-	fingerprint, err := legacyFingerprint(dir)
+	files, fingerprint, err := readLegacyFiles(dir)
 	if err != nil {
 		return d, err
 	}
-	s, err := openStore(filepath.Join(dir, "state.json"))
-	if err != nil {
-		return d, errors.New("legacy state.json or plans.json validation failed")
+	s := &Store{state: State{QQ: "----------"}, plans: defaultPlans()}
+	g := &adminGateway{members: map[string]Member{}}
+	if b, ok := files["state.json"]; ok {
+		if s.state, err = decodeState(b); err != nil {
+			return d, errors.New("legacy state.json validation failed")
+		}
 	}
-	g := newAdminGateway(Web{s, "", "", ""})
-	if g.loadErr != nil {
-		return d, errors.New("legacy members.json or owner.json validation failed")
-	}
-	after, err := legacyFingerprint(dir)
-	if err != nil || after != fingerprint {
-		return d, errors.New("legacy files changed during preflight")
+	for _, entry := range []struct {
+		name  string
+		apply func([]byte) error
+	}{
+		{"plans.json", s.applyPlans}, {"members.json", g.applyMembers}, {"owner.json", g.applyOwner},
+	} {
+		if b, ok := files[entry.name]; ok && entry.apply(b) != nil {
+			return d, fmt.Errorf("legacy %s validation failed", entry.name)
+		}
 	}
 	for i := range s.state.Cards {
 		c := &s.state.Cards[i]
@@ -93,7 +110,18 @@ func loadLegacy(dir string) (legacyData, error) {
 			return d, errors.New("audit timestamp outside PostgreSQL import range")
 		}
 	}
-	return legacyData{s.state, s.plans, g.members, g.owner, fingerprint}, nil
+	return legacyData{s.state, s.plans, g.members, g.owner, fingerprint, dir, nil}, nil
+}
+
+func (d legacyData) verifySource() error {
+	fingerprint, err := legacyFingerprint(d.sourceDir)
+	if d.sourceLock != nil && !d.sourceLock.owned() {
+		return errors.New("legacy source directory lock was lost")
+	}
+	if err != nil || fingerprint != d.fingerprint {
+		return errors.New("legacy files changed during migration")
+	}
+	return nil
 }
 
 func validPostgresInstant(t time.Time) bool { return t.Year() >= 1 && t.Year() <= 9999 }
@@ -174,26 +202,49 @@ func (p *postgresStore) importLegacy(ctx context.Context, d legacyData) error {
 			!reflect.DeepEqual(accounts.members, d.members) || !reflect.DeepEqual(accounts.owner, d.owner) {
 			return errors.New("legacy reconciliation failed")
 		}
-		return dbExec(ctx, tx, "INSERT INTO chezhi_import(fingerprint) VALUES ($1)", d.fingerprint)
+		if err := dbExec(ctx, tx, "INSERT INTO chezhi_import(fingerprint) VALUES ($1)", d.fingerprint); err != nil {
+			return err
+		}
+		return d.verifySource()
 	})
 }
 func databaseCommand(ctx context.Context, args []string) error {
 	command := args[0]
 	var d legacyData
+	profile := ""
 	if command == "db-import" {
 		if len(args) != 3 || (args[1] != "--dry-run" && args[1] != "--apply") {
 			return errors.New("usage: db-import --dry-run|--apply <legacy-dir>")
 		}
+		dir := args[2]
+		var lock *localDirectoryLock
+		if args[1] == "--apply" {
+			var err error
+			lock, err = lockLocalDirectory(dir)
+			if err != nil {
+				return err
+			}
+			defer lock.release()
+		} else if err := requireStoppedLegacy(dir); err != nil {
+			return err
+		}
 		var err error
-		d, err = loadLegacy(args[2])
+		d, err = loadLegacy(dir)
 		if err != nil {
 			return err
 		}
+		d.sourceLock = lock
 		fmt.Printf("Validated legacy snapshot: cards=%d audit=%d plans=%d members=%d owner=%t\n",
 			len(d.state.Cards), len(d.state.Audit), len(d.plans), len(d.members), d.owner != nil)
 		if args[1] == "--dry-run" {
-			return nil
+			if err := requireStoppedLegacy(dir); err != nil {
+				return err
+			}
+			return d.verifySource()
 		}
+	} else if command == "db-check" && len(args) == 2 &&
+		(args[1] == "--runtime" || args[1] == "--migrator" || args[1] == "--startup") {
+		profile = args[1]
 	} else if len(args) != 1 {
 		return errors.New("unexpected database command arguments")
 	}
@@ -206,7 +257,11 @@ func databaseCommand(ctx context.Context, args []string) error {
 	case "db-init":
 		err = p.migrate(ctx)
 	case "db-check":
-		err = p.checkSchema(ctx)
+		if profile == "--startup" {
+			err = p.checkSchema(ctx)
+		} else {
+			err = p.verifyDatabase(ctx, profile)
+		}
 	case "db-import":
 		if err = p.checkSchema(ctx); err == nil {
 			err = p.importLegacy(ctx, d)

@@ -62,6 +62,7 @@ type View struct {
 	Principal            Principal
 	Credential           string
 	OwnerConfigured      bool
+	SnapshotUnavailable  bool
 }
 
 func (w Web) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
@@ -209,15 +210,18 @@ func (w Web) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 		return
 	}
 	snapshot, plans, err := w.s.readView(r.Context(), true)
-	if err != nil && len(v.Keys) == 0 && v.Message == "" {
-		http.Error(rw, "service unavailable", 503)
-		return
-	}
-	// Deliver committed one-time keys even if a subsequent display read fails.
-	v.Plans = plans
-	v.Dashboard = buildDashboard(snapshot, v.Now, r.URL.Query())
-	v.Operations = buildOperations(snapshot, v.Now, v.Section, r.URL.Query())
 	rw.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err != nil {
+		// Acknowledged writes and their one-time response survive the read failure.
+		v.SnapshotUnavailable = true
+		if v.Message == "" {
+			rw.WriteHeader(http.StatusServiceUnavailable)
+		}
+	} else {
+		v.Plans = plans
+		v.Dashboard = buildDashboard(snapshot, v.Now, r.URL.Query())
+		v.Operations = buildOperations(snapshot, v.Now, v.Section, r.URL.Query())
+	}
 	if e := page.Execute(rw, v); e != nil {
 		log.Print("render failed")
 	}
@@ -326,20 +330,57 @@ func openLocalRuntime(args []string) (*Store, func(), error) {
 	if e := os.MkdirAll(dir, 0700); e != nil {
 		return nil, nil, e
 	}
-	lock := filepath.Join(dir, "instance.lock")
-	f, e := os.OpenFile(lock, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	lock, e := lockLocalDirectory(dir)
 	if e != nil {
-		return nil, nil, errors.New("data directory locked; stop previous instance first")
+		return nil, nil, e
 	}
-	f.Close()
-	release := func() { _ = os.Remove(lock) }
 	s, e := openStore(filepath.Join(dir, "state.json"))
 	if e != nil {
-		release()
+		lock.release()
 		return nil, nil, fmt.Errorf("cannot load state: %w", e)
 	}
-	return s, release, nil
+	return s, lock.release, nil
 }
+
+type localDirectoryLock struct {
+	path     string
+	file     *os.File
+	identity os.FileInfo
+}
+
+// The exclusive-create sentinel is also honored by the P2.1.7 JSON server.
+func lockLocalDirectory(dir string) (*localDirectoryLock, error) {
+	path := filepath.Join(dir, "instance.lock")
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return nil, errors.New("data directory locked; stop previous instance first")
+		}
+		return nil, errors.New("cannot acquire data directory lock")
+	}
+	identity, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, errors.New("cannot verify data directory lock ownership")
+	}
+	return &localDirectoryLock{path: path, file: f, identity: identity}, nil
+}
+
+func (l *localDirectoryLock) owned() bool {
+	current, err := os.Lstat(l.path)
+	return err == nil && os.SameFile(l.identity, current)
+}
+
+func (l *localDirectoryLock) release() {
+	// Hold the handle while comparing file identities, then close before
+	// unlinking for Windows. Only the holder removes the sentinel.
+	owned := l.owned()
+	l.file.Close()
+	if owned {
+		_ = os.Remove(l.path)
+	}
+}
+
 func serve(ctx context.Context, s *Store) error {
 	ln, e := net.Listen("tcp4", "127.0.0.1:0")
 	if e != nil {

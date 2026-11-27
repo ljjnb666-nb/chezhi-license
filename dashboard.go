@@ -196,6 +196,8 @@ func adminError(err error) string {
 		return "请输入有效的数字。"
 	}
 	switch err.Error() {
+	case errCommitUnknown.Error():
+		return "保存结果待核验。请先按原订单号查找记录，再决定是否重试。"
 	case "请检查套餐配置":
 		return err.Error()
 	case "invalid plan, count or amount":

@@ -50,6 +50,11 @@ func (s *Store) loadPlans() error {
 	if e != nil {
 		return e
 	}
+	return s.applyPlans(b)
+}
+
+func (s *Store) applyPlans(b []byte) error {
+	var e error
 	var saved []Plan
 	if e = uniqueJSON(b); e != nil {
 		return e
