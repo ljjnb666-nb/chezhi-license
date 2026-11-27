@@ -11,6 +11,10 @@ from pathlib import Path
 import secrets
 import struct
 import subprocess
+import time
+import re
+from collections import Counter
+from threading import BoundedSemaphore
 from urllib.parse import urlsplit, urlunsplit
 
 from caddy_acceptance import caddy_proxy
@@ -122,6 +126,104 @@ def vector():
                   struct.pack(">Qqq", 1, 1700000000, 1700000120))
     assert len(transcript) == 177
     assert sha256(transcript).hexdigest() == "5f1e67d4edd02f440ea3c2e2c8eab78cfa060a6dcfe31e2b02509a59fa36ab09"
+
+
+def exercise_capacity(folder, a, b, diagnostics, query, scope, card, key, public, signer):
+    """Bounded synthetic workload on the disposable V2 database only."""
+    # The previous functional assertions use the same fixture source budget.
+    # Isolate measurement from them; never clear a production rate limiter.
+    query("DELETE FROM chezhi_rate_limits")
+    def snapshot():
+        return query("SELECT to_jsonb(t)::text FROM chezhi_secure_bindings t ORDER BY card_id"), query(
+            "SELECT to_jsonb(t)::text FROM chezhi_cards t ORDER BY id")
+    def metrics():
+        values = []
+        for diagnostic in diagnostics:
+            status, _, body = diagnostic.request("/metrics")
+            assert status == 200
+            value = {name:int(count) for name,count in re.findall(
+                r"^(chezhi_db_[a-z_]+) (\d+)$",body,re.M)}
+            for name in ("chezhi_http_requests_total","chezhi_http_errors_total"):
+                match = re.search(r"^"+name+r'\{group="public"\} (\d+)$',body,re.M)
+                assert match is not None,"public request metric missing"
+                value[name] = int(match[1])
+            assert {"chezhi_db_connections_open","chezhi_db_connections_in_use",
+                    "chezhi_db_connections_idle","chezhi_db_pool_waits_total"} <= value.keys()
+            values.append(value)
+        return values
+    def pctl(values, p):
+        ordered = sorted(values)
+        return ordered[(p*len(ordered)+99)//100-1]
+    before = snapshot()
+    pool_before = metrics()
+    clients = (a,b)
+    # The server intentionally admits only three simultaneous public
+    # handlers per instance. Keep one spare slot for response-finalization
+    # overlap. Worker concurrency is not the HTTP in-flight limit.
+    slots = (BoundedSemaphore(2),BoundedSemaphore(2))
+    def worker(i):
+        start = time.perf_counter()
+        with slots[i%2]:
+            proof = prepare(clients[i%2],scope,"renew",card,key,public)
+        challenged = time.perf_counter()
+        with slots[1-i%2]:
+            data = post(clients[1-i%2],"renew",proof)
+        completed = time.perf_counter()
+        return (data,(challenged-start)*1000,(completed-challenged)*1000,(completed-start)*1000)
+    started = time.perf_counter()
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        results = list(pool.map(worker,range(32)))
+    elapsed = time.perf_counter()-started
+    # Independent OpenSSL verifier uses fixed temporary file names: serialize
+    # verification outside the measured parallel request path.
+    nonces = set()
+    for data,_,_,_ in results:
+        verify(folder,data,scope,public,card,signer)
+        assert data["nonce"] not in nonces
+        nonces.add(data["nonce"])
+    assert len(nonces)==32 and len({x[0]["revision"] for x in results})==1
+    assert snapshot()==before,"renewal changed binding or license lifecycle"
+    for label,index in (("challenge_and_sign",1),("renew",2),("end_to_end",3)):
+        samples=[x[index] for x in results]
+        print(f"V2_CAPACITY phase={label} workers=16 http_inflight_budget=4 transactions=32 p50_ms={pctl(samples,50):.1f} "
+              f"p95_ms={pctl(samples,95):.1f} p99_ms={pctl(samples,99):.1f} max_ms={max(samples):.1f}",flush=True)
+    print(f"V2_CAPACITY throughput={32/elapsed:.2f} transactions_per_second success=32 errors=0 "
+          f"pool_before={pool_before} pool_after={metrics()}",flush=True)
+    proof=prepare(a,scope,"renew",card,key,public)
+    def duplicate(i):
+        with slots[i%2]:
+            code,headers,raw=clients[i%2].request("/api/v2/licenses/renew","POST",json.dumps(proof),
+                                                   {"Content-Type":"application/json"})
+        reply=json.loads(raw)
+        assert reply["version"]=="v2" and reply["request_id"]==headers["x-request-id"]
+        if code==200:
+            assert reply["data"]["nonce"]==proof["nonce"]
+            return code,reply["data"]
+        assert code==403 and "data" not in reply and reply["error"]["code"]=="authorization_denied"
+        return code,None
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        duplicates=list(pool.map(duplicate,range(8)))
+    assert Counter(code for code,_ in duplicates)=={200:1,403:7}
+    verify(folder,next(data for code,data in duplicates if code==200),scope,public,card,signer)
+    assert snapshot()==before,"replayed renewal changed binding or license lifecycle"
+    # Public counters are finalized in the handler defer. Give the final
+    # response's bookkeeping a bounded opportunity to settle.
+    deadline = time.monotonic()+3
+    expected = (37,36)  # 32 requests each, then one challenge + 8 replays
+    while True:
+        observed = metrics()
+        deltas = tuple(after["chezhi_http_requests_total"]-prior["chezhi_http_requests_total"]
+                       for prior,after in zip(pool_before,observed))
+        if deltas==expected or time.monotonic()>=deadline:
+            break
+        time.sleep(0.05)
+    assert deltas==expected,("public metric delta",deltas,expected)
+    assert all(after["chezhi_http_errors_total"]==prior["chezhi_http_errors_total"]
+               and after["chezhi_db_pool_waits_total"]>=prior["chezhi_db_pool_waits_total"]
+               for prior,after in zip(pool_before,observed))
+    print(f"V2_METRICS_PASS public_requests={sum(deltas)} server_errors=0 per_instance={deltas}",flush=True)
+    print("PASS V2 bounded capacity, independent signatures, stable licensing state, cross-instance replay rejection",flush=True)
+    query("DELETE FROM chezhi_rate_limits")
 
 
 def run_v2_suite(root, folder, binary, common, migration_env, runtime_env, password,
@@ -239,6 +341,7 @@ def run_v2_suite(root, folder, binary, common, migration_env, runtime_env, passw
             rebound=post(b,"activate",prepare(a,scope,"activate",card,k2,p2))
             verify(folder,rebound,scope,p2,card,public_key)
             assert rebound["revision"]>credential["revision"] and rebound["license_expires_at"]==credential["license_expires_at"]
+            exercise_capacity(folder,a,b,(da,db),query,scope,card,k2,p2,public_key)
             pending=prepare(a,scope,"validate",card,k2,p2)
             revoked=a.issue(cookie,"v2-revoked-order")
             assert revoked
@@ -250,13 +353,17 @@ def run_v2_suite(root, folder, binary, common, migration_env, runtime_env, passw
                         {"Origin":"https://example.invalid"})=="browser_origin_forbidden"
             assert post(a,"challenge",dict(key=card,public_key=p2,operation="validate",extra="x"),400)=="invalid_json"
             assert query("SELECT count(*) FROM chezhi_secure_bindings")=="3"
+            dump_started=time.perf_counter()
             pg("pg_dump","-d",live,"-Fc","--no-owner","--no-acl","-f",dump)
+            dump_seconds=time.perf_counter()-dump_started
             assert post(b,"validate",pending,200)["valid"]
         print("PASS V2 real two-process TLS, independent OpenSSL transcripts/signatures, atomic replay, foreign key denial, unbind/rebind, revoke and legacy downgrade",flush=True)
 
+        recovery_started=time.perf_counter()
         pg("createdb",restored)
         created_restore=True
         pg("pg_restore","-d",restored,"--exit-on-error","--single-transaction","--no-owner","--no-acl",dump)
+        restore_seconds=time.perf_counter()-recovery_started
         sql(None,db=restored,stdin=grants)
         er,rr,dr,_=endpoint(restored,signer)
         cli(er,success=False)
@@ -276,6 +383,8 @@ def run_v2_suite(root, folder, binary, common, migration_env, runtime_env, passw
             verify(folder,renewed,new_scope,p2,card,public_key)
             assert post(rr,"validate",prepare(rr,new_scope,"validate",revoked,k1,p1),403)=="authorization_denied"
             assert rr.license("activate",card,"legacy")["data"]["status"]=="secure_protocol_required"
+        print(f"V2_RECOVERY_TIMING dump_seconds={dump_seconds:.3f} restore_create_seconds={restore_seconds:.3f} "
+              f"verified_recovery_seconds={time.perf_counter()-recovery_started:.3f}",flush=True)
         print("PASS V2 native logical restore, old challenge rejection, changed scope, preserved secure bindings and revoked state",flush=True)
 
         new_signer,new_key=make_signer("v2-rotated-"+suffix)
