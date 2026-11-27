@@ -48,7 +48,9 @@ Challenge transcript:
 - 32-byte deployment ID; 1-byte product length; product bytes.
 - One-byte operation (1 activate, 2 validate, 3 renew).
 - 32-byte random nonce, 32-byte normalized-card SHA-256, 32-byte device fingerprint.
-- 8-byte issue time, 8-byte expiry time (maximum 120 seconds).
+- 8-byte positive card authorization epoch, 8-byte issue time, 8-byte
+  expiry time (maximum 120 seconds). The prior 169-byte fixture is retired;
+  the new fixed fixture is 177 bytes. V7 discards all pending V5/V6 challenges.
 - Device public key: 65-byte SEC1 uncompressed P-256 point. Fingerprint =
   SHA-256 of that exact point. Signature = SHA-256 transcript then ECDSA
   P1363 r||s (64 bytes), canonical low-S. Reject other encodings.
@@ -74,7 +76,7 @@ verification until the full policy and P4 storage/time boundary are validated.
 A deterministic challenge transcript hash fixture is included in proof_test.go.
 No live signing keys or device credentials are committed.
 
-## V5 challenge persistence (real PostgreSQL test passed; full container revalidation pending)
+## V5 challenge persistence (CI 45990141404 passed)
 
 V5 adds a dedicated `chezhi_challenges` table with bounded canonical payloads,
 nonce primary key and expiry index. The database clock determines validity.
@@ -100,7 +102,7 @@ capacity, corrupt payload rejection, deep checks and mode-switch invalidation.
 Actual license mutations, multiple HTTP processes and restore replay tests
 remain part of the later integration gate.
 
-## V6 secure binding foundation (implementation; CI pending)
+## V6 secure binding foundation (CI 45990141404 passed)
 
 A permanent row in `chezhi_secure_bindings` marks a card as requiring
 cryptographic proof. It stores the canonical public point and a monotonic
@@ -122,22 +124,51 @@ public-key/fingerprint consistency. Reapply runtime grants offline.
 
 The internal `lockSecureCard` primitive is not an HTTP route. Its caller
 must consume a valid challenge on the same transaction and check that the
-challenge's authorization epoch is still current. This epoch fencing is
-NOT yet implemented. The existing V5 challenge does not bind the revision.
-Do not expose this primitive via HTTP until revision fencing, keyring and
-commit-confirmed credential issuance are complete. The lifecycle fixture
-uses fresh proofs and tests the storage boundary only.
+challenge's authorization epoch is still current. V7 now enforces this in the shared challenge consumer. Do not expose the
+primitive separately from that consumer. A deployment-wide signing keyring
+and an explicit secure-only issuance policy remain necessary before V2
+HTTP integration.
+
+## V7 authorization epoch and confirmed signing (implementation; CI pending)
+
+V7 adds `chezhi_cards.auth_epoch`, initialized to 1 for every historical
+card, and advances it in the shared application write paths whenever
+activation, binding, unbinding or revocation changes card state. All these
+writes hold the same card row lock. Direct SQL modifications outside these
+paths and old binaries are unsupported; the deployment must retire old
+binaries and use documented runtime grants. A challenge is issued only
+for an existing card. The epoch is captured under the card lock and is
+part of the signed transcript. The consume transaction locks the challenge
+first, then locks the card and verifies both epoch and DB-clock expiry
+again after waiting. Administrative writes do not acquire challenge locks.
+This prevents ABA reuse across legacy bind/unbind, secure rebind, and revoke.
+V7 migration clears pending challenges without altering historical card
+entitlements or secure binding rows. Offline upgrade and grant refresh
+are mandatory. The V7 catalog includes the new column and constraint.
+
+`authorizeProof` combines challenge consumption, secure binding or
+validation, post-write epoch, DB-clock claims and Ed25519 signing in one
+transaction. Its return value is published only after confirmed commit;
+a failed signer rolls back the card mutation and challenge deletion, and
+an ambiguous commit returns no credential. The credential revision is the
+post-write card epoch, not the separate V6 binding revision. Credential
+TTL is bounded by both the configured internal duration and card expiry;
+perpetual cards still have expiring credentials. Clients cannot choose
+the signing key or the TTL. This is an internal entry point only: the
+trusted keyring and deployment scope policy are not implemented yet.
+
+`TestPostgresAuthorizationEpoch` covers legacy and secure ABA transitions,
+old challenges after unbind/rebind, revoke and integrity checks.
+`TestPostgresCommittedCredential` covers signing failure rollback,
+commit-confirmed claims, signature verification, replay, renewal and revoke.
+CI 45990141404 established the V6 baseline (10/10, including Docker and
+real PostgreSQL). V7 is not yet accepted.
 
 ## Required integration work (not yet implemented)
-
-- V7+ migration: bind pending challenges to the authoritative card epoch,
-  including previously legacy/unbound cards, and implement signing keyring policy.
-- Integrate the V5 atomic consumption callback with the V6 card/identity
-  mutation and enforce authorization epoch fencing across admin mutations. Repeated signatures alone are
-  intentionally NOT rejected by the pure verifier.
 - Apply shared HTTP rate limits to challenge issuance, malformed and failed
   requests; avoid secrets and replayable material in logs.
-- Strict v2 wire decoding, native HTTPS activation/validation/renewal, deny
+- Strict v2 wire decoding, native HTTPS activation/validation/renewal, secure-only
+  policy for newly issued production cards before first activation, deny
   algorithm confusion and all v1/browser/demo downgrade paths for protected
   licenses. Preserve legacy bindings pending explicit authorized migration;
   never silently rebind or reset first activation/expiry/revocation.
@@ -151,5 +182,5 @@ uses fresh proofs and tests the storage boundary only.
 - HTTP 503 classification and P5 capacity gates remain open.
 
 Do not deploy or enable v2 until the integration and independent acceptance
-are complete. Existing legacy licenses retain their behavior; V6 rejects legacy requests
-for secure-marked cards and does not enable any V2 endpoint.
+are complete. Existing legacy licenses retain their behavior; secure-marked cards reject
+legacy requests. No V2 endpoint is enabled yet.
