@@ -294,7 +294,8 @@ jobs:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: ci_ephemeral_only
         ports:
-          - 5432/tcp
+          # The benchmark restarts PostgreSQL to clear shared buffers.
+          - 55432:5432
         options: >-
           --health-cmd "pg_isready -U postgres -d chezhi"
           --health-interval 2s

@@ -479,6 +479,9 @@ def measure_dashboard_http(a,b,cookie,sql,diagnostics):
                 selected=[x for x in events if x[0]==name]
                 statuses=Counter(x[1] for x in selected)
                 samples=[x[2] for x in selected if x[1]==200]
+                if len(samples)!=len(selected):
+                    print(f"HTTP dashboard failed cards={amount} trial={trial+1} section={name} "
+                          f"statuses={dict(statuses)} error_rate={(len(selected)-len(samples))/len(selected):.4f}",flush=True)
                 assert len(samples)==len(selected), (name,dict(statuses))
                 trial_p95[name].append(perc(samples,95))
                 combined[name].extend(samples)

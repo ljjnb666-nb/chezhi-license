@@ -321,3 +321,47 @@ func TestServerConnectionLimit(t *testing.T) {
 		t.Fatal("listener failed to stop while at capacity")
 	}
 }
+
+func TestPostgresServerUpgradeV4RetainsBusinessAndClearsOldSecurity(t *testing.T) {
+	s, _ := postgresFixture(t)
+	ctx := context.Background()
+	pgExec(t, s, `CREATE TABLE chezhi_schema (version integer PRIMARY KEY CHECK(version>0),
+        applied_at timestamptz NOT NULL DEFAULT clock_timestamp())`)
+	for i, migration := range postgresMigrations[:3] {
+		pgExec(t, s, migration)
+		pgExec(t, s, "INSERT INTO chezhi_schema(version) VALUES ($1)", i+1)
+	}
+	if _, err := s.issue(30, 1, 700, "wechat", "upgrade-order", "admin"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.pg.initializeOwner(ctx, "synthetic migration owner"); err != nil {
+		t.Fatal(err)
+	}
+	key := randomToken()
+	if err := s.pg.createSharedSession(ctx, "", key, "admin", "owner", 1); err != nil {
+		t.Fatal(err)
+	}
+	if allowed, err := s.pg.allowShared(ctx, "login", digestSecret("example"), 60, 5); err != nil || !allowed {
+		t.Fatal(err)
+	}
+	before := pgSnapshot(t, s)
+	pgInitialize(t, s)
+	after := pgSnapshot(t, s)
+	if !reflect.DeepEqual(after, before) {
+		t.Fatal("V4 migration modified business or audit history")
+	}
+	if _, err := s.pg.sharedSession(ctx, key); err != errSessionInvalid {
+		t.Fatal("V3 session survived deployment binding", err)
+	}
+	var remaining int
+	if err := s.pg.db.QueryRow("SELECT count(*) FROM chezhi_rate_limits").Scan(&remaining); err != nil || remaining != 0 {
+		t.Fatal("V3 rate state survived deployment binding", err)
+	}
+	binding, matched, err := deploymentState(ctx, s.pg.db)
+	if err != nil || !matched || binding.mode != "local" || binding.generation != 1 {
+		t.Fatal("V4 default deployment binding was not initialized", err)
+	}
+	if err := s.pg.verifyDatabase(ctx, "--migrator"); err != nil {
+		t.Fatal(err)
+	}
+}
