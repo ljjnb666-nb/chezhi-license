@@ -24,6 +24,9 @@ var postgresCatalogV5 string
 //go:embed postgres_catalog_v6.json
 var postgresCatalogV6 string
 
+//go:embed postgres_catalog_v7.json
+var postgresCatalogV7 string
+
 func verifyPostgresCatalog(ctx context.Context, tx *sql.Tx) error {
 	var manifest string
 	if err := tx.QueryRowContext(ctx, postgresCatalogSQL).Scan(&manifest); err != nil {
@@ -39,6 +42,9 @@ func verifyPostgresCatalog(ctx context.Context, tx *sql.Tx) error {
 	var secure map[string]string
 	if json.Unmarshal([]byte(postgresCatalogV6), &secure) != nil { return errors.New("invalid V6 catalog manifest") }
 	for key, definition := range secure { expected[key] = definition }
+	var epochs map[string]string
+	if json.Unmarshal([]byte(postgresCatalogV7), &epochs) != nil { return errors.New("invalid V7 catalog manifest") }
+	for key, definition := range epochs { expected[key] = definition }
 	var mismatches []string
 	for key, definition := range expected {
 		if actual[key] != definition {
@@ -196,7 +202,7 @@ func verifyRuntimeRole(ctx context.Context, tx *sql.Tx) error {
             ('chezhi_schema', true, false, false, ARRAY[]::text[]),
             ('chezhi_config', true, false, false, ARRAY['qq','accounts_revision']),
             ('chezhi_orders', true, true, false, ARRAY[]::text[]),
-            ('chezhi_cards', true, true, false, ARRAY['activated','expires','device','revoked']),
+            ('chezhi_cards', true, true, false, ARRAY['activated','expires','device','revoked','auth_epoch']),
             ('chezhi_audit', true, true, false, ARRAY[]::text[]),
             ('chezhi_plans', true, false, false, ARRAY['cents','visible']),
             ('chezhi_members', true, true, false, ARRAY['role','digest','disabled','revision']),
