@@ -164,7 +164,7 @@ commit-confirmed claims, signature verification, replay, renewal and revoke.
 CI 45990141404 established the V6 baseline (10/10, including Docker and
 real PostgreSQL). V7 exact run 45991509773 passed the new PostgreSQL tests, Docker and eight other checks; the dashboard benchmark failed before tests due to a host port collision (55432). No benchmark result is inferred.
 
-## V8 signing policy and opt-in V2 API (implementation; CI pending)
+## V8 signing policy and opt-in V2 API (CI 45993306835: 10/10 passed)
 
 The database signing policy stores only a public key and random deployment
 scope. Existing deployments without a policy remain in legacy/demo mode.
@@ -204,6 +204,40 @@ are subject to the existing shared licensing rate budget. Current tests use
 real TLS and PostgreSQL with an injected trusted request context; complete
 process-level and Caddy acceptance are still required.
 
+## V9 signing history and online reference client (CI pending)
+
+V9 preserves public signing policy events in chezhi_signing_history.
+Initialization, rotation and logical recovery write an event in the same
+transaction as the new scope. Migration records only the active V8 policy
+as a migration_baseline, not invented historical events. The restricted
+runtime can read history, not change or delete it. Startup/deep checking
+requires the active scope and public key to match a recorded event.
+Rotation refuses any public key already recorded in history. A compromised
+or restored older database may itself omit later events; reconciliation
+against an independently retained recovery record remains mandatory.
+Do not treat database-resident history as tamper-proof or rollback-proof.
+
+Use db-signing-info with the configured database connection to print the
+active product, deployment, verification public key and SHA-256 key ID.
+Distribute these public trust settings through an authenticated release or
+operator channel, never trust a key obtained from an arbitrary API response.
+Private seed access is checked using the same opened file handle that is read.
+Windows ACL verification and operational compromise procedures remain open.
+
+internal/licenseclient implements an online-only reference verifier using
+a crypto.Signer device-key interface. It uses HTTPS with system or explicitly
+configured roots, no redirects, cookies or ambient proxy, bounded responses,
+exact JSON fields, independent challenge and credential transcript reconstruction,
+and a preprovisioned deployment scope and Ed25519 key. It checks the expected
+card ID, device, product, lifetime and challenge-relative authorization revision.
+It does not persist keys or cards, cache offline authorization or implement
+a trustworthy clock, monotonic persisted revision or a Windows SDK.
+The current response is authenticated by TLS and the server signature;
+the credential itself is not signed over the individual challenge nonce.
+Reference tests exercise adversarial responses and a TLS handler connected
+to real PostgreSQL. Complete process, Caddy, restore and recovery acceptance
+remain outstanding.
+
 ## Required integration work (not yet implemented)
 - Apply shared HTTP rate limits to challenge issuance, malformed and failed
   requests; avoid secrets and replayable material in logs.
@@ -212,13 +246,12 @@ process-level and Caddy acceptance are still required.
   algorithm confusion and all v1/browser/demo downgrade paths for protected
   licenses. Preserve legacy bindings pending explicit authorized migration;
   never silently rebind or reset first activation/expiry/revocation.
-- Finish signing-key lifecycle: persistent rotation audit, historical key
-  trust/retirement policy, compromise response, restore acceptance, protected
-  file/ACL verification, and explicit client trust updates.
+- Validate signing history, recovery and retired-key policy; complete compromise
+  response, restore acceptance, Windows ACL verification and trusted distribution.
 - Verify ambiguous commit and response-loss recovery through fresh challenges
   and DB reconciliation in actual HTTP processes.
-- Reference client, cross-language vectors, real two-process PostgreSQL
-  HTTPS negative tests, restore and compatibility tests. P4 integrates
+- Reference client integration acceptance, cross-language vectors, real two-process
+  PostgreSQL HTTPS negative tests, restore and compatibility tests. P4 integrates
   Windows protected storage and trustworthy time policy.
 - HTTP 503 classification and P5 capacity gates remain open.
 

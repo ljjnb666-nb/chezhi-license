@@ -86,7 +86,8 @@ func loadSigningKey() (ed25519.PrivateKey,error) {
 
 func (p *postgresStore) configureSigner(ctx context.Context) (*serverSigner,error) {
 	var policy *signingPolicy
-	err:=p.transaction(ctx,&sql.TxOptions{ReadOnly:true},func(ctx context.Context,tx *sql.Tx) error {
+	err:=p.transaction(ctx,&sql.TxOptions{ReadOnly:true,Isolation:sql.LevelRepeatableRead},func(ctx context.Context,tx *sql.Tx) error {
+		if err:=verifySigningHistory(ctx,tx);err!=nil { return err }
 		var e error
 		policy,e=readSigningPolicy(ctx,tx)
 		return e

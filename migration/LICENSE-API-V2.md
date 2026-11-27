@@ -47,3 +47,16 @@ and P4 protected device-key storage remain outstanding.
 
 See P3-SECURITY.md for binary field layout and threat model. This contract
 is under development, not a production API or SDK compatibility promise.
+
+## Reference client and trust provisioning
+
+Use `db-signing-info` against the intended database to obtain public trust
+settings, then distribute through an independently authenticated channel.
+`internal/licenseclient.New` accepts the HTTPS origin, expected scope,
+trusted Ed25519 public key and optional private CA roots. `Authorize` takes
+a context, operation, card and P-256 `crypto.Signer`. It always performs
+an online exchange and returns verified claims on success only. It does not
+persist keys, perform offline authorization or establish hardware identity.
+The caller must fail closed on unsuccessful refresh. P4 will supply protected
+key storage and application state integration. Never print card values or
+private keys in logs. The client is internal, not a stable public SDK yet.
