@@ -14,11 +14,16 @@ func (w Web) purchase(rw http.ResponseWriter, r *http.Request) {
 		http.Error(rw, "method not allowed", 405)
 		return
 	}
+	state, plans, err := w.s.readView(r.Context(), false)
+	if err != nil {
+		http.Error(rw, "service unavailable", 503)
+		return
+	}
 	rw.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := purchasePage.Execute(rw, struct {
 		QQ    string
 		Plans []Plan
-	}{w.s.snapshot().QQ, w.s.catalog()}); err != nil {
+	}{state.QQ, plans}); err != nil {
 		return
 	}
 }
@@ -64,7 +69,7 @@ func (w Web) demoActivate(rw http.ResponseWriter, r *http.Request) {
 		http.Error(rw, "rate limited", 429)
 		return
 	}
-	res, err := w.s.validate(req.Key, req.Device)
+	res, err := w.s.validateContext(r.Context(), req.Key, req.Device)
 	if err != nil {
 		http.Error(rw, "service unavailable", 503)
 		return

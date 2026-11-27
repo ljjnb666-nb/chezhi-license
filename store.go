@@ -2,6 +2,7 @@ package main
 
 import (
 	"chezhi.local/licenseprototype/internal/license"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -41,6 +42,7 @@ type State struct {
 	Audit []Audit
 }
 type Store struct {
+	pg        *postgresStore
 	mu        sync.Mutex
 	path      string
 	state     State
@@ -102,6 +104,9 @@ func (s *Store) commit(x State) error {
 	return nil
 }
 func (s *Store) issue(days, n, amount int, channel, ref string, actors ...string) ([]string, error) {
+	return s.issueContext(context.Background(), days, n, amount, channel, ref, actors...)
+}
+func (s *Store) issueContext(ctx context.Context, days, n, amount int, channel, ref string, actors ...string) ([]string, error) {
 	if days < 0 || days > 3650 || n < 1 || n > 100 || amount < 0 || amount > 100000000 {
 		return nil, errors.New("invalid plan, count or amount")
 	}
@@ -112,87 +117,95 @@ func (s *Store) issue(days, n, amount int, channel, ref string, actors ...string
 	if !validOrderRef(ref) {
 		return nil, errors.New("sale reference required (max 80 bytes)")
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	x := clone(s.state)
-	for _, c := range x.Cards {
-		if c.SaleRef == ref {
-			return nil, errors.New("sale reference already issued")
-		}
-	}
 	keys := make([]string, 0, n)
-	now := s.now().UTC()
-	for i := 0; i < n; i++ {
-		raw, h, p, e := license.GenerateKey()
-		if e != nil {
-			return nil, e
-		}
+	err := s.mutate(ctx, mutationScope{order: ref}, func(x *State) error {
 		for _, c := range x.Cards {
-			if c.Hash == h || c.ID == h[:24] {
-				return nil, errors.New("key collision; retry")
+			if c.SaleRef == ref {
+				return errOrderExists
 			}
 		}
-		id := h[:24]
-		x.Cards = append(x.Cards, Card{ID: id, Hash: h, Prefix: p, Days: days, SaleRef: ref, Channel: channel, AmountCents: amount, Created: now})
-		x.Audit = append(x.Audit, Audit{At: now, Action: "issue", CardID: id, Actor: auditActor(actors)})
-		keys = append(keys, raw)
-	}
-	if e := s.commit(x); e != nil {
-		return nil, e
+		now := s.now().UTC()
+		for i := 0; i < n; i++ {
+			raw, h, p, e := license.GenerateKey()
+			if e != nil {
+				return e
+			}
+			for _, c := range x.Cards {
+				if c.Hash == h || c.ID == h[:24] {
+					return errors.New("key collision; retry")
+				}
+			}
+			id := h[:24]
+			x.Cards = append(x.Cards, Card{ID: id, Hash: h, Prefix: p, Days: days, SaleRef: ref, Channel: channel, AmountCents: amount, Created: now})
+			x.Audit = append(x.Audit, Audit{At: now, Action: "issue", CardID: id, Actor: auditActor(actors)})
+			keys = append(keys, raw)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return keys, nil
 }
 func (s *Store) validate(raw, device string) (license.ValidationResult, error) {
+	return s.validateContext(context.Background(), raw, device)
+}
+func (s *Store) validateContext(ctx context.Context, raw, device string) (license.ValidationResult, error) {
 	if len(raw) > 100 || len(device) > 200 || strings.TrimSpace(device) == "" {
 		return license.ValidationResult{Reason: "invalid_input"}, nil
 	}
 	h := license.HashKey(raw)
 	dh := sha256.Sum256([]byte(strings.TrimSpace(device)))
 	d := hex.EncodeToString(dh[:])
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	x := clone(s.state)
-	now := s.now().UTC()
-	for i := range x.Cards {
-		c := &x.Cards[i]
-		if c.Hash != h {
-			continue
-		}
-		r := license.Validate(c.Expires, 0, c.Revoked, "demo", "demo", now)
-		if c.Expires != nil && !now.Before(*c.Expires) && !c.Revoked {
-			r.Valid = false
-			r.Reason = "expired"
-		}
-		if !r.Valid {
-			return r, nil
-		}
-		if c.Device != "" && c.Device != d {
-			return license.ValidationResult{Reason: "device_mismatch"}, nil
-		}
-		changed := false
-		if c.Activated == nil {
-			if now.Before(c.Created) {
-				return license.ValidationResult{}, errors.New("system clock precedes issuance")
+	var result license.ValidationResult
+	err := s.mutate(ctx, mutationScope{hash: h}, func(x *State) error {
+		now := s.now().UTC()
+		for i := range x.Cards {
+			c := &x.Cards[i]
+			if c.Hash != h {
+				continue
 			}
-			c.Activated = &now
-			if c.Days != 0 {
-				c.Expires = license.ComputeExpiry(&c.Days, now)
+			r := license.Validate(c.Expires, 0, c.Revoked, "demo", "demo", now)
+			if c.Expires != nil && !now.Before(*c.Expires) && !c.Revoked {
+				r.Valid = false
+				r.Reason = "expired"
 			}
-			changed = true
-		}
-		if c.Device == "" {
-			c.Device = d
-			changed = true
-		}
-		if changed {
-			x.Audit = append(x.Audit, Audit{At: now, Action: "bind", CardID: c.ID, Actor: "user"})
-			if e := s.commit(x); e != nil {
-				return license.ValidationResult{}, e
+			if !r.Valid {
+				result = r
+				return nil
 			}
+			if c.Device != "" && c.Device != d {
+				result.Reason = "device_mismatch"
+				return nil
+			}
+			changed := false
+			if c.Activated == nil {
+				if now.Before(c.Created) {
+					return errors.New("system clock precedes issuance")
+				}
+				c.Activated = &now
+				if c.Days != 0 {
+					c.Expires = license.ComputeExpiry(&c.Days, now)
+				}
+				changed = true
+			}
+			if c.Device == "" {
+				c.Device = d
+				changed = true
+			}
+			if changed {
+				x.Audit = append(x.Audit, Audit{At: now, Action: "bind", CardID: c.ID, Actor: "user"})
+			}
+			result = license.Validate(c.Expires, 0, false, "demo", "demo", now)
+			return nil
 		}
-		return license.Validate(c.Expires, 0, false, "demo", "demo", now), nil
+		result.Reason = "not_found"
+		return nil
+	})
+	if err != nil {
+		return license.ValidationResult{}, err
 	}
-	return license.ValidationResult{Reason: "not_found"}, nil
+	return result, nil
 }
 func (s *Store) change(id, action string, actors ...string) error {
 	return s.changeBatch([]string{id}, action, actors...)
@@ -200,12 +213,12 @@ func (s *Store) change(id, action string, actors ...string) error {
 
 // All selected records must exist; publish the whole batch or none.
 func (s *Store) changeBatch(ids []string, action string, actors ...string) error {
+	return s.changeContext(context.Background(), ids, action, actors...)
+}
+func (s *Store) changeContext(ctx context.Context, ids []string, action string, actors ...string) error {
 	if len(ids) == 0 || len(ids) > 100 || (action != "revoke" && action != "unbind") {
 		return errors.New("请选择 1–100 张卡密及有效操作")
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	x := clone(s.state)
 	selected := map[string]bool{}
 	for _, id := range ids {
 		if selected[id] || len(id) != 24 {
@@ -213,31 +226,33 @@ func (s *Store) changeBatch(ids []string, action string, actors ...string) error
 		}
 		selected[id] = true
 	}
-	found := 0
-	now := s.now().UTC()
-	for i := range x.Cards {
-		c := &x.Cards[i]
-		if !selected[c.ID] {
-			continue
-		}
-		found++
-		if c.Revoked {
-			return errors.New("已吊销卡密不能再次操作")
-		}
-		if action == "unbind" {
-			if c.Device == "" {
-				return errors.New("所选卡密存在未绑定设备")
+	return s.mutate(ctx, mutationScope{ids: ids}, func(x *State) error {
+		found := 0
+		now := s.now().UTC()
+		for i := range x.Cards {
+			c := &x.Cards[i]
+			if !selected[c.ID] {
+				continue
 			}
-			c.Device = ""
-		} else {
-			c.Revoked = true
+			found++
+			if c.Revoked {
+				return errors.New("已吊销卡密不能再次操作")
+			}
+			if action == "unbind" {
+				if c.Device == "" {
+					return errors.New("所选卡密存在未绑定设备")
+				}
+				c.Device = ""
+			} else {
+				c.Revoked = true
+			}
+			x.Audit = append(x.Audit, Audit{At: now, Action: action, CardID: c.ID, Actor: auditActor(actors)})
 		}
-		x.Audit = append(x.Audit, Audit{At: now, Action: action, CardID: c.ID, Actor: auditActor(actors)})
-	}
-	if found != len(ids) {
-		return errors.New("部分卡密不存在，未执行任何操作")
-	}
-	return s.commit(x)
+		if found != len(ids) {
+			return errors.New("部分卡密不存在，未执行任何操作")
+		}
+		return nil
+	})
 }
 
 // This global budget is sufficient for a single local test instance only.
@@ -256,6 +271,9 @@ func (s *Store) allowActivation() bool {
 	return true
 }
 func (s *Store) setQQ(q string, actors ...string) error {
+	return s.setQQContext(context.Background(), q, actors...)
+}
+func (s *Store) setQQContext(ctx context.Context, q string, actors ...string) error {
 	q = strings.TrimSpace(q)
 	if q != "----------" {
 		if len(q) < 5 || len(q) > 12 {
@@ -267,12 +285,11 @@ func (s *Store) setQQ(q string, actors ...string) error {
 			}
 		}
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	x := clone(s.state)
-	x.QQ = q
-	x.Audit = append(x.Audit, Audit{At: s.now().UTC(), Action: "support_config", Actor: auditActor(actors)})
-	return s.commit(x)
+	return s.mutate(ctx, mutationScope{support: true}, func(x *State) error {
+		x.QQ = q
+		x.Audit = append(x.Audit, Audit{At: s.now().UTC(), Action: "support_config", Actor: auditActor(actors)})
+		return nil
+	})
 }
 func cardStatus(c Card, now time.Time) string {
 	if c.Revoked {
@@ -318,9 +335,40 @@ func auditActor(actors []string) string {
 // Separate metadata files cannot share the state.json transaction. Callers must
 // report a failed audit append rather than claim atomic success across files.
 func (s *Store) recordAudit(actor, action, target string) error {
+	return s.auditContext(context.Background(), actor, action, target)
+}
+func (s *Store) auditContext(ctx context.Context, actor, action, target string) error {
+	return s.mutate(ctx, mutationScope{}, func(x *State) error {
+		x.Audit = append(x.Audit, Audit{At: s.now().UTC(), Action: action, Actor: actor, Target: target})
+		return nil
+	})
+}
+
+func (s *Store) mutate(ctx context.Context, scope mutationScope, apply func(*State) error) error {
+	if s.pg != nil {
+		return s.pg.mutate(ctx, scope, apply)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	x := clone(s.state)
-	x.Audit = append(x.Audit, Audit{At: s.now().UTC(), Action: action, Actor: actor, Target: target})
-	return s.commit(x)
+	next := clone(s.state)
+	if err := apply(&next); err != nil {
+		return err
+	}
+	if next.QQ == s.state.QQ && len(next.Audit) == len(s.state.Audit) {
+		return nil
+	}
+	return s.commit(next)
+}
+
+func (s *Store) readView(ctx context.Context, full bool) (State, []Plan, error) {
+	if s.pg != nil {
+		return s.pg.readView(ctx, full)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state := State{QQ: s.state.QQ}
+	if full {
+		state = clone(s.state)
+	}
+	return state, append([]Plan(nil), s.plans...), nil
 }

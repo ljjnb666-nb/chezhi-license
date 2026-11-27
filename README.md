@@ -215,3 +215,9 @@ P1.2 仍为本机原型，生产数据库和设备持有证明集成仍待开发
 - 本轮执行：63 个 Go 测试及子测试（race），go vet，node --check；27 组实际 HTTP 检查；22 项 Python 迁移恢复测试，运行数据 SQLite 迁移演练；Windows x64/Linux amd64 重新编译。
 - Chromium E2E 实际尝试失败：ERR_BLOCKED_BY_ADMINISTRATOR，尚未打开登录页，不算浏览器测试通过。Windows GUI/Edge、剪贴板、响应式布局和视觉验收未执行。当前是本地候选基线，不是生产发布。
 - 残留：独立文件之间事务原子性、生产 TLS/数据库、MFA、跨设备授权及真实硬件身份均未完成；历史日志仅为应用记录，不是防篡改审计。首次设置长期密码前仍保留本机自动化 Basic Auth 兼容路径。启动完整性检查不是对恶意本地文件修改的认证。未引入第三方组件或修改校园网认证代码。
+
+## P2.2 PostgreSQL
+
+The server keeps the existing loopback-only UI, client API and JSON startup
+command. See [PostgreSQL setup, cutover and recovery](migration/POSTGRES.md) for
+the database backend, PowerShell commands, migration, runtime grants, and backup.

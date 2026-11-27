@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
+	"database/sql"
 	"encoding/csv"
 	"encoding/hex"
 	"encoding/json"
@@ -132,6 +133,9 @@ func (g *adminGateway) memberList() []Member {
 	return out
 }
 func (g *adminGateway) updateMember(name, role, action string) (string, error) {
+	return g.updateMemberContext(context.Background(), name, role, action, "")
+}
+func (g *adminGateway) updateMemberContext(ctx context.Context, name, role, action, actor string) (string, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if !memberName.MatchString(name) || name == "admin" {
@@ -170,7 +174,16 @@ func (g *adminGateway) updateMember(name, role, action string) (string, error) {
 		return "", errors.New("不支持的操作。")
 	}
 	next[name] = m
-	if e := g.saveMembers(next); e != nil {
+	if g.w.s.pg != nil {
+		revision, err := g.w.s.pg.changeAccount(ctx, Audit{At: g.w.s.now().UTC(), Action: action, Actor: actor, Target: name},
+			func(ctx context.Context, tx *sql.Tx, revision int64) error { return writeMember(ctx, tx, m, revision) })
+		if err != nil {
+			return "", err
+		}
+		g.members = next
+		g.revisions[name] = revision
+		g.accountRevision = revision
+	} else if e := g.saveMembers(next); e != nil {
 		return "", errors.New("保存失败，请检查数据目录。")
 	}
 	for k, s := range g.sessions {
@@ -209,10 +222,15 @@ func roleLabel(role string) string {
 
 // Owner-only, consistent business-data snapshot; no member credentials or live sessions.
 func (s *Store) backup() ([]byte, error) {
-	s.mu.Lock()
-	state, e := json.MarshalIndent(s.state, "", "  ")
-	plans, e2 := json.MarshalIndent(s.plans, "", "  ")
-	s.mu.Unlock()
+	return s.backupContext(context.Background())
+}
+func (s *Store) backupContext(ctx context.Context) ([]byte, error) {
+	snapshot, catalog, err := s.readView(ctx, true)
+	if err != nil {
+		return nil, err
+	}
+	state, e := json.MarshalIndent(snapshot, "", "  ")
+	plans, e2 := json.MarshalIndent(catalog, "", "  ")
 	if e != nil {
 		return nil, e
 	}
@@ -268,10 +286,10 @@ func (w Web) downloadBackup(rw http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.URL.Path == "/export" {
-		w.exportCards(rw)
+		w.exportCards(rw, r)
 		return
 	}
-	b, e := w.s.backup()
+	b, e := w.s.backupContext(r.Context())
 	if e != nil {
 		http.Error(rw, "备份失败", 500)
 		return
@@ -294,13 +312,13 @@ func (g *adminGateway) handleMembers(rw http.ResponseWriter, r *http.Request, s 
 		http.Error(rw, "请求无效", 403)
 		return
 	}
-	credential, e := g.updateMember(r.PostForm.Get("name"), r.PostForm.Get("role"), r.PostForm.Get("action"))
+	credential, e := g.updateMemberContext(r.Context(), r.PostForm.Get("name"), r.PostForm.Get("role"), r.PostForm.Get("action"), s.name)
 	v := View{Section: "members", CSRF: s.csrf, Principal: Principal{Name: s.name, Role: s.role, Members: g.memberList()}, Credential: credential}
 	if e != nil {
 		v.Error = e.Error()
 	} else {
 		v.Message = "账户设置已保存。"
-		if g.w.s.recordAudit(s.name, r.PostForm.Get("action"), r.PostForm.Get("name")) != nil {
+		if g.w.s.pg == nil && g.w.s.recordAudit(s.name, r.PostForm.Get("action"), r.PostForm.Get("name")) != nil {
 			v.Error = "账户已更新，但操作日志写入失败，请检查数据目录。"
 		}
 	}
@@ -317,8 +335,12 @@ func safeCSV(s string) string {
 	}
 	return s
 }
-func (w Web) exportCards(rw http.ResponseWriter) {
-	state := w.s.snapshot()
+func (w Web) exportCards(rw http.ResponseWriter, r *http.Request) {
+	state, _, err := w.s.readView(r.Context(), true)
+	if err != nil {
+		http.Error(rw, "database unavailable", 503)
+		return
+	}
 	var b bytes.Buffer
 	b.WriteString("\xef\xbb\xbf")
 	c := csv.NewWriter(&b)

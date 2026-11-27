@@ -143,3 +143,52 @@ jobs:
           mkdir -p bin
           CGO_ENABLED=0 go build -trimpath -o bin/chezhi-license-linux-amd64 .
           timeout 180s .ci-venv/bin/python browser_e2e.py ./bin/chezhi-license-linux-amd64
+
+  postgres:
+    name: PostgreSQL persistence and HTTP
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17.10-alpine
+        env:
+          POSTGRES_DB: chezhi
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: ci_ephemeral_only
+        ports:
+          - 5432/tcp
+        options: >-
+          --health-cmd "pg_isready -U postgres -d chezhi"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5
+        with:
+          go-version: '1.26.x'
+          cache: false
+      - name: Real database integration with race detector
+        env:
+          CHEZHI_TEST_DATABASE_URL: postgres://postgres:ci_ephemeral_only@127.0.0.1:${{ job.services.postgres.ports[5432] }}/chezhi?sslmode=disable
+        run: |
+          set -euo pipefail
+          mkdir -p bin
+          go test -race -run '^TestPostgres' -count=1 -v ./... | tee bin/postgres-test.txt
+      - name: Database commands, HTTP and native backup recovery
+        env:
+          CHEZHI_TEST_DATABASE_URL: postgres://postgres:ci_ephemeral_only@127.0.0.1:${{ job.services.postgres.ports[5432] }}/chezhi?sslmode=disable
+          CHEZHI_TEST_POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
+        run: |
+          set -euo pipefail
+          CGO_ENABLED=0 go build -trimpath -o bin/chezhi-license .
+          python3 migration/postgres_acceptance.py ./bin/chezhi-license | tee bin/postgres-acceptance.txt
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: postgres-acceptance
+          path: bin/postgres-*.txt
+          retention-days: 7
+          if-no-files-found: warn

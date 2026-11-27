@@ -1,0 +1,19 @@
+name: chezhi-license-pg
+services:
+  postgres:
+    image: postgres:17.10-alpine
+    environment:
+      POSTGRES_DB: chezhi
+      POSTGRES_USER: chezhi_migrator
+      POSTGRES_PASSWORD: ${CHEZHI_LOCAL_DB_PASSWORD:?set CHEZHI_LOCAL_DB_PASSWORD}
+    ports:
+      - "127.0.0.1:${CHEZHI_LOCAL_DB_PORT:-55432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "chezhi_migrator", "-d", "chezhi"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+volumes:
+  pgdata:
