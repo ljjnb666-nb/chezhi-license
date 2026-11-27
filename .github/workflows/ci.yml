@@ -171,6 +171,15 @@ jobs:
         with:
           go-version: '1.26.11'
           cache: false
+      - name: Python acceptance syntax preflight
+        run: |
+          python3 - <<'PY'
+          import ast
+          import pathlib
+          for path in sorted(pathlib.Path('.').glob('*.py')) + sorted(pathlib.Path('migration').rglob('*.py')):
+              ast.parse(path.read_text(encoding='utf-8'), filename=str(path))
+          print("PYTHON_ACCEPTANCE_SYNTAX_PASS")
+          PY
       - name: Build and run live HTTP tests
         shell: bash
         run: |
