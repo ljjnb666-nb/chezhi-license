@@ -1,0 +1,16 @@
+# INERT REVIEW TEMPLATE. No real hostname, tunnel ID or credential.
+# This file is NOT installed or executed by the staging controller.
+# Only offline ingress validation is authorized at this stage.
+tunnel: 00000000-0000-0000-0000-000000000000
+credentials-file: /nonexistent/chezhi-disabled.json
+ingress:
+  - hostname: license.example.invalid
+    service: https://127.0.0.1:18445
+    originRequest:
+      originServerName: 127.0.0.1
+      httpHostHeader: license.example.invalid
+      caPool: /nonexistent/chezhi-gateway-ca.pem
+      noTLSVerify: false
+      connectTimeout: 3s
+      tlsTimeout: 3s
+  - service: http_status:404

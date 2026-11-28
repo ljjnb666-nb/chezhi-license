@@ -401,6 +401,71 @@ def run_v2_suite(root, folder, binary, common, migration_env, runtime_env, passw
             verify(folder,result,rotated_scope,p2,card,new_key)
         print("PASS V2 offline rotation, old private-key startup refusal, retired-key refusal, new credential trust",flush=True)
 
+        gateway_binary=os.getenv("CHEZHI_TEST_GATEWAY_BINARY")
+        if gateway_binary:
+            # Disposable CI fixture only; exact listener addresses,
+            # independent TLS certificates and the actual compiled gateway.
+            import ssl
+            import signal
+            gateway_cert, gateway_key = folder / "gateway-cert.pem", folder / "gateway-key.pem"
+            openssl("req","-x509","-newkey","rsa:2048","-nodes","-days","1",
+                    "-subj","/CN=127.0.0.1","-addext","subjectAltName=IP:127.0.0.1",
+                    "-out",gateway_cert,"-keyout",gateway_key)
+            gateway_key.chmod(0o600)
+            dg=port()
+            eg=dict(target(common,live),CHEZHI_SIGNING_KEY_FILE=str(new_signer),
+                    CHEZHI_LISTEN="127.0.0.1:18443",
+                    CHEZHI_PUBLIC_ORIGIN="https://127.0.0.1:18443",
+                    CHEZHI_DIAGNOSTICS=f"127.0.0.1:{dg}",
+                    CHEZHI_LICENSE_PER_MINUTE="120",CHEZHI_LICENSE_GLOBAL_PER_MINUTE="240")
+            direct=Client(18443,"127.0.0.1:18443",cert_ctx)
+            diagnostic=Client(dg,f"127.0.0.1:{dg}")
+            gwctx=ssl.create_default_context(cafile=str(gateway_cert))
+            gw=Client(18445,"license.example.invalid",gwctx)
+            gwenv=dict(PATH=os.environ["PATH"],CHEZHI_GATEWAY_HOST="license.example.invalid",
+                       CHEZHI_GATEWAY_ORIGIN_CA=common["CHEZHI_TLS_CERT"],
+                       CHEZHI_GATEWAY_TLS_CERT=str(gateway_cert),CHEZHI_GATEWAY_TLS_KEY=str(gateway_key))
+            with instance(binary,eg,diagnostic):
+                admin=direct.login("admin",password)
+                gateway_card=direct.issue(admin,"v2-gateway-"+suffix)
+                assert gateway_card
+                gkey,gpub=device(folder,"gateway-device-"+suffix)
+                proc=subprocess.Popen([gateway_binary],env=gwenv,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+                try:
+                    def gateway_ready():
+                        assert proc.poll() is None,"gateway exited"
+                        return gw.request("/")[0]==404
+                    eventually(gateway_ready)
+                    before=query("SELECT count(*) FROM chezhi_challenges")
+                    for denied in ("/","/login","/backup","/export","/readyz","/metrics","/purchase",
+                                   "/api/v1/licenses/activate","/api/demo/activate","/api/v2/licenses/%72enew",
+                                   "/api/v2/licenses/renew?x=1","/api/v2/licenses/../licenses/renew"):
+                        code,headers,raw=gw.request(denied,"POST","{}",{"Content-Type":"application/json"})
+                        assert code==404 and json.loads(raw)["request_id"]==headers["x-request-id"]
+                        assert "set-cookie" not in headers and "location" not in headers
+                    assert query("SELECT count(*) FROM chezhi_challenges")==before
+                    for op in ("activate","validate","renew"):
+                        request=prepare(gw,rotated_scope,op,gateway_card,gkey,gpub)
+                        data=post(gw,op,request)
+                        verify(folder,data,rotated_scope,gpub,gateway_card,new_key)
+                        assert post(gw,op,request,403)=="authorization_denied"
+                    assert post(gw,"challenge",dict(key=gateway_card,public_key=gpub,operation="renew"),403,
+                                {"Origin":"https://example.invalid"})=="forbidden"
+                    assert direct.form("/?view=cards",dict(csrf=direct.csrf("/?view=cards",admin),
+                                       id=data["license_id"],action="revoke"),admin)[0]==200
+                    assert post(gw,"validate",prepare(gw,rotated_scope,"validate",gateway_card,gkey,gpub),403)=="authorization_denied"
+                    assert direct.license("activate",gateway_card,"legacy")["data"]["status"]=="secure_protocol_required"
+                    print("PASS GATEWAY_REAL_V2 exact routes, independent TLS and signatures, activate/validate/renew, replay, revocation and downgrade denial",flush=True)
+                finally:
+                    if proc.poll() is None:
+                        proc.send_signal(signal.SIGTERM)
+                    try:
+                        proc.wait(timeout=25)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.wait(timeout=5)
+                        raise
+                    assert proc.returncode==0,"gateway did not stop cleanly"
         executable=os.getenv("CHEZHI_TEST_CADDY_BINARY")
         image=os.getenv("CHEZHI_TEST_CADDY_IMAGE")
         if executable or image:
