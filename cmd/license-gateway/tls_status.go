@@ -1,11 +1,13 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
 	"fmt"
 	"net"
+	"log"
 	"time"
 )
 
@@ -29,4 +31,22 @@ func tlsStatus(target string, roots *x509.CertPool, local *x509.Certificate) err
 	}
 	fmt.Println("TLS_STATUS_OK")
 	return nil
+}
+
+// Inspect local origin trust at a fixed cadence. This cannot start or restart
+// the origin, alter keys, or send HTTP traffic. Errors are local alerts only.
+// The 5-second dial bound also limits shutdown overlap.
+func monitorTLS(ctx context.Context,logger *log.Logger,interval time.Duration,target string,roots *x509.CertPool,local *x509.Certificate) {
+	ticker:=time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		if ctx.Err()!=nil {return}
+		if err:=tlsStatus(target,roots,local);err!=nil {
+			logger.Printf("gateway_tls_warning: %s",err)
+		}
+		select {
+		case <-ctx.Done():return
+		case <-ticker.C:
+		}
+	}
 }
