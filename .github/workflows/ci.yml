@@ -385,6 +385,14 @@ jobs:
           CGO_ENABLED=0 go build -trimpath -o bin/chezhi-server .
           CGO_ENABLED=0 go build -trimpath -o bin/chezhi-gateway ./cmd/license-gateway
           docker build --tag chezhi-server:ci .
+      - name: Install age for isolated encrypted V2 recovery
+        run: |
+          set -euo pipefail
+          if ! command -v age >/dev/null || ! command -v age-keygen >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends age
+          fi
+          age --version
       - name: Two-process TLS, proxy, shared state and native container smoke
         env:
           CHEZHI_TEST_DATABASE_URL: postgres://postgres:ci_ephemeral_only@127.0.0.1:${{ job.services.postgres.ports[5432] }}/chezhi?sslmode=disable
@@ -392,12 +400,14 @@ jobs:
           CHEZHI_TEST_CONTAINER_IMAGE: chezhi-server:ci
           CHEZHI_TEST_GATEWAY_BINARY: ./bin/chezhi-gateway
           CHEZHI_TEST_GATEWAY_PACED: '1'
+          CHEZHI_TEST_ENCRYPTED_V2_RECOVERY: '1'
           CHEZHI_TEST_CADDY_IMAGE: caddy:2.11.4-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
         run: |
           set -euo pipefail
           python3 migration/server_acceptance.py ./bin/chezhi-server | tee bin/standalone-acceptance.txt
           grep -F 'PASS GATEWAY_REAL_V2' bin/standalone-acceptance.txt
           grep -F 'PASS GATEWAY_PACED' bin/standalone-acceptance.txt
+          grep -F 'PASS V2_ENCRYPTED_RECOVERY' bin/standalone-acceptance.txt
       - if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
