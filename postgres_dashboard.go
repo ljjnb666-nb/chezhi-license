@@ -55,9 +55,8 @@ const overviewCombinedSQL = `WITH quantities AS (
     SELECT c.ref,count(*) AS cards,
         count(*) FILTER (WHERE c.revoked) AS revoked,
         count(*) FILTER (WHERE NOT c.revoked AND c.expires<=$1::numeric) AS expired,
-        count(*) FILTER (WHERE NOT c.revoked AND (c.expires<=$1::numeric) IS NOT TRUE AND c.activated IS NULL) AS unused,
-        count(*) FILTER (WHERE NOT c.revoked AND (c.expires<=$1::numeric) IS NOT TRUE AND c.activated IS NOT NULL AND c.device='') AS unbound,
-        count(*) FILTER (WHERE NOT c.revoked AND (c.expires<=$1::numeric) IS NOT TRUE AND c.activated IS NOT NULL AND c.device<>'') AS active
+        count(*) FILTER (WHERE NOT c.revoked AND c.activated IS NULL) AS unused,
+        count(*) FILTER (WHERE NOT c.revoked AND c.activated IS NOT NULL AND c.device='' AND (c.expires<=$1::numeric) IS NOT TRUE) AS unbound
     FROM chezhi_cards c GROUP BY c.ref
 ), sales AS (
     SELECT CASE WHEN o.channel<>'test' AND o.created>=$2::numeric AND o.created<$3::numeric
@@ -68,7 +67,7 @@ const overviewCombinedSQL = `WITH quantities AS (
 SELECT grouping(day),day,coalesce(sum(cards) FILTER (WHERE paid),0),
     count(*) FILTER (WHERE paid),coalesce(sum(cents) FILTER (WHERE paid),0),
     coalesce(sum(cards),0),coalesce(sum(revoked),0),coalesce(sum(expired),0),
-    coalesce(sum(unused),0),coalesce(sum(unbound),0),coalesce(sum(active),0)
+    coalesce(sum(unused),0),coalesce(sum(unbound),0)
 FROM sales GROUP BY GROUPING SETS ((day),())`
 
 func readOverview(ctx context.Context, tx *sql.Tx, now time.Time, d *Dashboard, o *Operations) error {
@@ -82,17 +81,21 @@ func readOverview(ctx context.Context, tx *sql.Tx, now time.Time, d *Dashboard, 
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var summary, cards, orders, total, revoked, expired, unused, unbound, active int
+		var summary, cards, orders, total, revoked, expired, unused, unbound int
 		var day sql.NullInt32
 		var cents int64
 		if rows.Scan(&summary, &day, &cards, &orders, &cents, &total, &revoked,
-			&expired, &unused, &unbound, &active) != nil {
+			&expired, &unused, &unbound) != nil {
 			return errDatabase
 		}
 		if summary == 1 {
 			d.Stats.Orders, d.Stats.ManualCents = orders, cents
 			d.Stats.Total, d.Stats.Revoked, d.Stats.Expired = total, revoked, expired
-			d.Stats.Unused, d.Stats.Unbound, d.Stats.Active = unused, unbound, active
+			// The schema guarantees unactivated cards have NULL expiry.
+			// The five status buckets are disjoint and exhaustive.
+			if revoked+expired+unused+unbound > total { return errDatabase }
+			d.Stats.Unused, d.Stats.Unbound = unused, unbound
+			d.Stats.Active = total - revoked - expired - unused - unbound
 			continue
 		}
 		if day.Valid {
