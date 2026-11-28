@@ -15,7 +15,7 @@ for cmd in runsv sv svlogd flock timeout sha256sum openssl curl bash; do
     command -v "$cmd" >/dev/null || die "Missing dependency: $cmd"
 done
 here="$(cd -- "$(dirname -- "$0")" && pwd -P)"
-[ "$#" -eq 1 ] || die 'Usage: install | start | stop | status | backup-now | boot-enable | boot-disable | backup-loop | health-loop'
+[ "$#" -eq 1 ] || die 'Usage: install | start | stop | status | backup-now | boot-enable | boot-disable | boot-status | backup-loop | health-loop'
 case "$1" in
     install)
         # Install into a new private directory, never overwrite a live controller.
@@ -48,6 +48,17 @@ esac
 (cd "$ctl/code" && sha256sum -c --status SHA256SUMS) || die 'Controller scripts changed.'
 staging="$ctl/code/staging.sh"
 backup="$ctl/code/managed-backup.sh"
+boot_entry() {
+    # Termux:Boot can start with a minimal environment. Use the installed
+    # Termux Bash directory rather than relying on an interactive PATH.
+    local bash_path
+    bash_path="$(command -v bash)"
+    printf '#!%s\n' "$bash_path"
+    printf 'umask 077\nexport PATH="%s:/system/bin"\n' "$(dirname -- "$bash_path")"
+    printf 'cd "%s" || exit 1\n' "$HOME"
+    printf 'printf "BOOT_ENTRY_STARTED %%s\\n" "$(date -u +%%FT%%TZ)" > "%s/boot-attempt"\n' "$ctl"
+    printf 'exec "%s" "%s/code/supervisor.sh" start\n' "$bash_path" "$ctl"
+}
 case "$1" in
     start)
         exec 8>"$ctl/controller.lock"
@@ -113,13 +124,29 @@ case "$1" in
             exit 0
         }
         trap stop_loop TERM INT HUP
+        waiting=0
         while true; do
-            # A missed day is not replayed. The first healthy opportunity
-            # produces the current UTC day's backup; subsequent checks skip.
-            timeout -k 5s 20m bash "$backup" & child=$!
-            wait "$child" || printf 'Scheduled backup check failed; retry in 15 minutes.\n' >&2
-            child=''
-            sleep 900 & child=$!
+            [ ! -f "$ctl/stop-requested" ] || exit 0
+            # Startup and transient outages must not consume a daily slot.
+            # Poll readiness first, using the actual trusted origin.
+            if ! curl --noproxy '*' --fail --silent --show-error --max-time 5 \
+                --cacert "$root/tls-cert" https://127.0.0.1:18443/readyz >/dev/null 2>&1; then
+                if [ "$waiting" -eq 0 ]; then printf 'BACKUP_WAIT_READY\n'; fi
+                waiting=1
+                delay=5
+            else
+                if [ "$waiting" -eq 1 ]; then printf 'BACKUP_READY\n'; fi
+                waiting=0
+                timeout -k 5s 20m bash "$backup" & child=$!
+                if wait "$child"; then
+                    delay=900
+                else
+                    printf 'BACKUP_RETRY failure; retry in 60 seconds.\n' >&2
+                    delay=60
+                fi
+                child=''
+            fi
+            sleep "$delay" & child=$!
             wait "$child" || true
             child=''
         done
@@ -169,16 +196,29 @@ case "$1" in
         mkdir -p -m 700 "$boot"
         [ -d "$boot" ] && [ ! -L "$boot" ] || die 'Invalid boot directory.'
         file="$boot/90-chezhi-staging"
-        (set -o noclobber; printf '#!%s\nexec bash "%s" start\n' "$(command -v bash)" "$ctl/code/supervisor.sh" > "$file") || die 'Boot entry already exists.'
+        (set -o noclobber; boot_entry > "$file") || die 'Boot entry already exists.'
         chmod 700 "$file"
         printf 'Boot entry installed. No wake lock acquired; actual reboot must be tested.\n'
         ;;
     boot-disable)
         file="$HOME/.termux/boot/90-chezhi-staging"
         [ -f "$file" ] && [ ! -L "$file" ] || die 'No managed boot entry.'
-        expected="$(printf '#!%s\nexec bash "%s" start\n' "$(command -v bash)" "$ctl/code/supervisor.sh")"
+        expected="$(boot_entry)"
         [ "$(cat "$file")" = "$expected" ] || die 'Boot entry differs; inspect manually.'
         rm -- "$file"
+        ;;
+    boot-status)
+        file="$HOME/.termux/boot/90-chezhi-staging"
+        if [ -f "$file" ] && [ ! -L "$file" ] && [ "$(cat "$file")" = "$(boot_entry)" ]; then
+            printf 'BOOT_ENTRY_INSTALLED\n'
+        else
+            printf 'BOOT_ENTRY_ABSENT_OR_DIFFERENT\n'
+        fi
+        if [ -f "$ctl/boot-attempt" ] && [ ! -L "$ctl/boot-attempt" ]; then
+            cat "$ctl/boot-attempt"
+        else
+            printf 'BOOT_ENTRY_NOT_OBSERVED\n'
+        fi
         ;;
     *) die 'Unknown controller command.';;
 esac
