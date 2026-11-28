@@ -20,6 +20,7 @@ import (
 	"os"
 	"os/signal"
 	"regexp"
+	"strconv"
 	"syscall"
 	"sync"
 	"time"
@@ -85,6 +86,43 @@ func reject(w http.ResponseWriter, status int, code string) {
 	fmt.Fprintf(w, "{\"version\":\"v2\",\"request_id\":%q,\"error\":{\"code\":%q}}\n",id,code)
 }
 
+// Enforce the outer V2 envelope. The authorization client must still
+// independently validate every signed claim; this is not signature verification.
+func responseID(data []byte, status int, ids []string) (string, bool) {
+	if len(ids)!=1 || len(ids[0])!=32 { return "",false }
+	b,err:=hex.DecodeString(ids[0])
+	if err!=nil || hex.EncodeToString(b)!=ids[0] { return "",false }
+	d:=json.NewDecoder(bytes.NewReader(data))
+	first,err:=d.Token()
+	if err!=nil || first!=json.Delim('{') { return "",false }
+	fields:=map[string]json.RawMessage{}
+	for d.More() {
+		key,err:=d.Token()
+		name,ok:=key.(string)
+		if err!=nil || !ok || len(fields)>=3 { return "",false }
+		if _,exists:=fields[name]; exists { return "",false }
+		var raw json.RawMessage
+		if d.Decode(&raw)!=nil { return "",false }
+		fields[name]=raw
+	}
+	end,err:=d.Token()
+	if err!=nil || end!=json.Delim('}') || len(fields)!=3 { return "",false }
+	if _,err:=d.Token(); err!=io.EOF { return "",false }
+	var version,id string
+	if json.Unmarshal(fields["version"],&version)!=nil || version!="v2" ||
+		json.Unmarshal(fields["request_id"],&id)!=nil || id!=ids[0] { return "",false }
+	name:="error"
+	if status==http.StatusOK { name="data" }
+	payload:=fields[name]
+	if len(payload)==0 || payload[0]!='{' { return "",false }
+	if status!=http.StatusOK {
+		var e map[string]json.RawMessage
+		var code string
+		if json.Unmarshal(payload,&e)!=nil || len(e)!=1 || json.Unmarshal(e["code"],&code)!=nil || code=="" { return "",false }
+	}
+	return id,true
+}
+
 func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control","no-store")
 	w.Header().Set("X-Content-Type-Options","nosniff")
@@ -135,10 +173,16 @@ func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		reject(w,503,"unavailable"); return
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body,maxReply+1))
-	if err != nil || len(data)>maxReply || !json.Valid(data) { reject(w,503,"unavailable"); return }
+	if err != nil || len(data)>maxReply { reject(w,503,"unavailable"); return }
+	id,ok:=responseID(data,resp.StatusCode,resp.Header.Values("X-Request-ID"))
+	if !ok { reject(w,503,"unavailable"); return }
 	w.Header().Set("Content-Type","application/json; charset=utf-8")
-	if id := resp.Header.Get("X-Request-ID"); len(id) <= 64 && id != "" { w.Header().Set("X-Request-ID",id) }
-	if retry := resp.Header.Get("Retry-After"); len(retry) <= 64 && retry != "" { w.Header().Set("Retry-After",retry) }
+	w.Header().Set("X-Request-ID",id)
+	if values:=resp.Header.Values("Retry-After"); len(values)==1 {
+		if seconds,err:=strconv.Atoi(values[0]); err==nil && seconds>=0 && seconds<=3600 {
+			w.Header().Set("Retry-After",strconv.Itoa(seconds))
+		}
+	}
 	w.WriteHeader(resp.StatusCode)
 	_, _ = w.Write(data)
 }
