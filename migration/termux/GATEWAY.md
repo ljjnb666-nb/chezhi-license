@@ -493,3 +493,32 @@ and sales plan samples remain for comparison. Wider hash aggregate
 state can increase memory or spill; inspect temp blocks, HTTP P95,
 resource use and actual parity before retaining this candidate.
 No changes to the frozen physical-device versions.
+
+### Strict repeat capacity gate
+
+CI 46128035873 (head c64ec94, checkout b726ff3) passed 13/13.
+The combined overview empty/test-only parity passed on actual PG18.
+The 100k repeated overview/cards/orders/devices/audit P95 medians
+were 418.4/81.9/366.4/76.2/65.4ms, all passing, and the standalone
+single-trial target also passed. Mixed 10k and 100k reads were
+320/320 each, first-attempt issuance and zero admission rejects.
+The combined overview plan used 2713 shared hits and zero temp
+writes in 51.91ms; separate status/sales samples were 18.01/31.65ms
+and 2619/2713 hits. Reduced logical reads and a round trip do not
+prove an isolated execution speedup. Keep the current SQL as a
+candidate without further speculative tuning.
+
+The comparison workflow now requires two independently initialized
+candidate profiles (same runner, separate disposable databases and
+processes, identical original 16-reader workloads). Each profile
+must pass all repeated 500ms median-trial P95 targets at both data
+sizes, exactly 320/320 mixed reads and one first-attempt successful
+issuance per size, two instances with all four admission counters
+present and unchanged across the mixed phase. Successful activation
+remains required by the original fixture. Both profile exit statuses
+and explicit CAPACITY_GATE PASS markers are required; the second
+runs even if the first fails, and baseline failure still fails the
+job. Preserve separate text logs and plan JSON, including the
+repeat directory. This is a strengthened synthetic regression gate,
+not sustained physical-device or Cloudflare capacity acceptance.
+No additional SQL, application admission, quota or phone changes.
