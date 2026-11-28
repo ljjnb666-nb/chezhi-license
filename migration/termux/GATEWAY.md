@@ -809,3 +809,46 @@ unlinking source. No new runtime gateway or SQL changes, no
 scheduled cleanup, remote log transfer, archive encryption or hard
 disk cap. Actual Termux directory fsync and live phone maintenance
 are still unverified. Do not interrupt the endurance device.
+
+### Offline archive pass and local notification handoff candidate
+
+CI 46135249759 (head de2dfda, checkout f2a0ab1) passed 13/13,
+third consecutive full passing candidate. PG18 job 140950148539
+explicitly archived four eligible synthetic logs after real pg_ctl
+stop, preserved protected logs and verified restart sentinel.
+Both strict capacity profiles passed (100k overview 355.7/347.4ms,
+orders 229.0/219.9ms), all mixed phases passed. Independent recovery
+passed again (6.506s small synthetic fixture). No phone action.
+Prior intermittent capacity misses and physical verification gates
+remain recorded.
+
+Independent client admission is intentionally not implemented at
+the loopback gateway: remote peer is the local proxy, caller headers
+and claimed device/card IDs are not authenticated identities.
+Keep global gateway budget and authoritative origin quotas; do not
+trust forwarded headers or introduce a spoofable per-client map.
+An authorized external edge with verified identity and separately
+reviewed trust boundary is required for that remaining work.
+
+Local status export is opt-in through a pre-provisioned private
+absolute directory. A fresh V2 controller creates status/ mode
+0700 and sets CHEZHI_GATEWAY_STATUS_DIR. The monitoring goroutine
+publishes fixed schema v1 status.json (0600) at startup and one-minute
+cadence, via temporary file, fsync, rename and directory fsync.
+Only process timestamps, lifecycle OBSERVING/STOPPING, aggregate
+HTTP counters and two alert-open flags; no card, key, client address,
+headers, bodies or arbitrary log strings. No new HTTP route, tunnel,
+external notification or secret. Existing raw metric logs remain.
+Consumers must reject stale snapshots (e.g. > 180s old), future or
+invalid timestamps and unexpected versions, and treat STOPPING
+as not ready. OBSERVING is not readiness, HTTP200 is not proof of
+license validity, closed alert is not proof of recovery, counters
+are non-atomic samples and reset at restart. Shutdown snapshot is
+best effort, not proof of shutdown. Write failure emits a fixed
+local message; stale or absent file must not be interpreted as OK.
+Directory and ancestors must be private and controlled by operator;
+same-UID tampering is outside this boundary. Abrupt death may leave
+a temporary file; do not auto-delete unrelated files. POSIX tests
+cover modes, replacement, symlink refusal, alert flags and cancellation.
+Android filesystem and notification consumer/delivery still require
+validation. No existing installed controller is upgraded automatically.
