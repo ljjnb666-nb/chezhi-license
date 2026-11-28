@@ -538,11 +538,11 @@ def measure_dashboard_http(a,b,cookie,sql,diagnostics):
                     writes=work.result()
                 finally:
                     finished.set()
-                observed.result()
-            mixed_after=[stats(diag) for diag in diagnostics]
-            for index,(old,new) in enumerate(zip(mixed_before,mixed_after)):
-                delta={key:new[key]-old[key] for key in new if key.startswith("admission_") and key in old}
-                print(f"MIXED_ADMISSION cards={amount} instance={index+1} counters={delta or 'not available in historical baseline'}",flush=True)
+                    observed.result()
+                    mixed_after=[stats(diag) for diag in diagnostics]
+                    for index,(old,new) in enumerate(zip(mixed_before,mixed_after)):
+                        delta={key:new[key]-old[key] for key in new if key.startswith("admission_") and key in old}
+                        print(f"MIXED_ADMISSION cards={amount} instance={index+1} counters={delta or 'not available in historical baseline'}",flush=True)
             assert sampled.is_set()
             status=Counter(event[1] for event in mixed)
             print(f"MIXED cards={amount} reads={len(mixed)} responses={dict(status)} "
