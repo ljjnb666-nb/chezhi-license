@@ -65,10 +65,15 @@ func (m *gatewayMetrics) report(logger *log.Logger) {
 func (m *gatewayMetrics) monitor(ctx context.Context,logger *log.Logger,interval time.Duration) {
 	ticker:=time.NewTicker(interval)
 	defer ticker.Stop()
+	alerts:=&gatewayAlerts{}
 	for {
 		select {
 		case <-ctx.Done():return
-		case <-ticker.C:m.report(logger)
+		case <-ticker.C:
+			m.report(logger)
+			alerts.sample(m,func(category,event string){
+				logger.Printf("gateway_alert category=%s state=%s",category,event)
+			})
 		}
 	}
 }
