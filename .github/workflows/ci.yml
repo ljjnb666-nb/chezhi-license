@@ -649,6 +649,11 @@ jobs:
           set -euo pipefail
           python3 -m py_compile migration/termux/postgres-log-retention.py
           python3 migration/termux/test-postgres-log-retention.py
+      - name: Local gateway status observer negative and transition tests
+        run: |
+          set -euo pipefail
+          python3 -m py_compile migration/termux/gateway-status-observer.py
+          python3 migration/termux/gateway-status-observer.py --self-test
       - name: Independent gateway runit and log rotation fixture
         run: |
           set -euo pipefail
