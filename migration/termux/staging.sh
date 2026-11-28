@@ -47,6 +47,18 @@ case "$1" in
         [[ "$3" =~ ^[0-9a-f]{64}$ ]] || die 'Expected lowercase SHA256.'
         [ "$(sha256sum "$2" | cut -d ' ' -f1)" = "$3" ] || die 'Binary digest mismatch.'
         [ -f "$here/../postgres_runtime_grants.sql" ] || die 'Missing reviewed runtime grants.'
+        # Validate the interactive input before creating any database or secret.
+        [ ! -e "$root" ] && [ ! -L "$root" ] || die 'Existing staging path; inspect manually.'
+        [ -t 0 ] || die 'Use an interactive terminal for the supervisor password.'
+        while true; do
+            read -r -s -p 'New supervisor password (at least 14 characters, at most 128 UTF-8 bytes): ' owner
+            printf '\n'
+            chars="$(printf '%s' "$owner" | LC_ALL=C.UTF-8 wc -m)"
+            bytes="$(printf '%s' "$owner" | LC_ALL=C wc -c)"
+            if [ "$chars" -ge 14 ] && [ "$bytes" -le 128 ]; then break; fi
+            unset owner
+            printf '%s\n' 'Password must contain at least 14 characters and at most 128 UTF-8 bytes; try again.' >&2
+        done
         # Fresh path only; never overwrite existing credentials or database.
         mkdir -m 700 -- "$root" || die 'Existing staging path; inspect manually.'
         trap 'rm -f -- "$root/owner-once" "$root/init-password"' EXIT
@@ -71,9 +83,6 @@ case "$1" in
         migrate db-init
         sql -d chezhi -f "$here/../postgres_runtime_grants.sql"
         migrate db-set-mode chezhi server
-        [ -t 0 ] || die "Use an interactive terminal for the supervisor password."
-        read -r -s -p 'New supervisor password (14-128 UTF-8 bytes): ' owner
-        printf '\n'
         printf '%s' "$owner" > "$root/owner-once"
         unset owner
         env -i PATH="$PATH" HOME="$HOME" CHEZHI_DATABASE_URL_FILE="$root/migration-url" \
