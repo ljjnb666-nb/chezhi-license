@@ -553,6 +553,7 @@ def measure_dashboard_http(a,b,cookie,sql,diagnostics):
                   f"issue_responses={dict(writes)} activations=1 lock_samples={len(lock_samples)} "
                   f"lock_waiters_peak={max(lock_samples,default=0)}",flush=True)
             if strict:
+                before_failures=len(capacity_failures)
                 if len(mixed)!=320 or status!=Counter({200:320}) or writes!=Counter({200:1}):
                     capacity_failures.append(f"mixed cards={amount}: read or first issuance failure")
                 required={"admission_admin_shared","admission_admin_issue","admission_public","admission_export"}
@@ -563,7 +564,7 @@ def measure_dashboard_http(a,b,cookie,sql,diagnostics):
                         capacity_failures.append(f"mixed cards={amount} instance={index+1}: admission rejection or reset")
                 if len(mixed_before)!=2 or len(mixed_after)!=2:
                     capacity_failures.append(f"mixed cards={amount}: expected two instances")
-                print(f"CAPACITY_MIXED cards={amount} passed={not any('cards='+str(amount)+':' in x or 'cards='+str(amount)+' ' in x for x in capacity_failures)}",flush=True)
+                print(f"CAPACITY_MIXED cards={amount} passed={len(capacity_failures)==before_failures}",flush=True)
             for name in paths:
                 ok=[event[2] for event in mixed if event[0]==name and event[1]==200]
                 print(f"MIXED_LATENCY cards={amount} section={name} samples={len(ok)} "
