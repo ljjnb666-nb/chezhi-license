@@ -412,3 +412,30 @@ are not counted as admission rejection. Keep existing performance
 workloads and acceptance limits unchanged. A real before/after result
 and renewed phone capacity review are required before activation.
 No change to the frozen M4/M6 versions or physical phone.
+
+### Narrow issuance admission follow-up
+
+CI 46126052417 (head d06f9e9, checkout 6c15ac2) produced actual
+mixed-load improvement: at 10k and 100k cards, each 320/320 reads
+succeeded, issuance succeeded on the first attempt, and all four
+admission rejection deltas were zero on both instances. Historical
+100k profile had 14/320 read 503s and two issuance 503s before success.
+No DB pool waits were observed in the candidate snapshots. However,
+100k overview/order repeated P95 was 657.7/677.4ms, still above 500ms.
+This single profile is not proof of sustained capacity.
+
+The standalone job failed the six-way sensitive credential limit gate:
+actual two 200 and four 503 rather than expected two 200 and four 429.
+The generic one-slot POST lane starved the requests before their
+account quota checks. The replacement reserves one slot only for
+POST /?view=issue with exact raw query. All other administrative
+requests retain the original shared eight slots. This is a routing
+hint, never an authenticated role or proof of form action. Diagnostics
+now label the two categories admin_shared and admin_issue, with public
+and export unchanged. The original security test's exact expected
+status counts and persistent account quota assertions remain intact.
+New tests cover account/password, login, other POSTs and ambiguous
+issuance query falling into the shared lane. Re-run both standalone
+and repeated dashboard gates on the revised candidate; do not
+attribute the earlier zero-503 result to this untested revision.
+No activation, merge, or phone operation.
