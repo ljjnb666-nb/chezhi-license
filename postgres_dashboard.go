@@ -46,53 +46,52 @@ func (p *postgresStore) dashboardPage(ctx context.Context, v *View, q url.Values
 	})
 }
 
-const overviewStatusSQL = `SELECT count(*),
-    count(*) FILTER (WHERE c.revoked),
-    count(*) FILTER (WHERE NOT c.revoked AND c.expires<=$1::numeric),
-    count(*) FILTER (WHERE NOT c.revoked AND (c.expires<=$1::numeric) IS NOT TRUE AND c.activated IS NULL),
-    count(*) FILTER (WHERE NOT c.revoked AND (c.expires<=$1::numeric) IS NOT TRUE AND c.activated IS NOT NULL AND c.device=''),
-    count(*) FILTER (WHERE NOT c.revoked AND (c.expires<=$1::numeric) IS NOT TRUE AND c.activated IS NOT NULL AND c.device<>'')
-FROM chezhi_cards c`
-
-// Group quantities before joining orders. Both all-time totals and the trend
-// use that same set of paid orders, with no card-row DISTINCT or second join.
-const overviewSalesSQL = `WITH quantities AS (
-    SELECT ref,count(*) AS cards FROM chezhi_cards GROUP BY ref
+// Aggregate each card exactly once into its order. The FK ensures every
+// card belongs to an order. Status totals include test orders; revenue
+// and trend explicitly exclude them. GROUPING distinguishes total rows
+// from the NULL day bucket for orders outside the seven-day window.
+const overviewCombinedSQL = `WITH quantities AS (
+    SELECT c.ref,count(*) AS cards,
+        count(*) FILTER (WHERE c.revoked) AS revoked,
+        count(*) FILTER (WHERE NOT c.revoked AND c.expires<=$1::numeric) AS expired,
+        count(*) FILTER (WHERE NOT c.revoked AND (c.expires<=$1::numeric) IS NOT TRUE AND c.activated IS NULL) AS unused,
+        count(*) FILTER (WHERE NOT c.revoked AND (c.expires<=$1::numeric) IS NOT TRUE AND c.activated IS NOT NULL AND c.device='') AS unbound,
+        count(*) FILTER (WHERE NOT c.revoked AND (c.expires<=$1::numeric) IS NOT TRUE AND c.activated IS NOT NULL AND c.device<>'') AS active
+    FROM chezhi_cards c GROUP BY c.ref
 ), sales AS (
-    SELECT CASE WHEN o.created>=$1::numeric AND o.created<$2::numeric
-        THEN floor((o.created-$1::numeric)/86400)::int END AS day,
-        q.cards,q.cards::numeric*o.cents AS cents
-    FROM quantities q JOIN chezhi_orders o USING(ref) WHERE o.channel<>'test'
+    SELECT CASE WHEN o.channel<>'test' AND o.created>=$2::numeric AND o.created<$3::numeric
+        THEN floor((o.created-$2::numeric)/86400)::int END AS day,
+        q.*,o.channel<>'test' AS paid,q.cards::numeric*o.cents AS cents
+    FROM quantities q JOIN chezhi_orders o USING(ref)
 )
-SELECT grouping(day),day,coalesce(sum(cards),0),count(*),coalesce(sum(cents),0)
+SELECT grouping(day),day,coalesce(sum(cards) FILTER (WHERE paid),0),
+    count(*) FILTER (WHERE paid),coalesce(sum(cents) FILTER (WHERE paid),0),
+    coalesce(sum(cards),0),coalesce(sum(revoked),0),coalesce(sum(expired),0),
+    coalesce(sum(unused),0),coalesce(sum(unbound),0),coalesce(sum(active),0)
 FROM sales GROUP BY GROUPING SETS ((day),())`
 
 func readOverview(ctx context.Context, tx *sql.Tx, now time.Time, d *Dashboard, o *Operations) error {
-	// Preserve CASE precedence and NULL expiry semantics without grouping
-	// by localized status strings. All counts come from the same snapshot.
-	if tx.QueryRowContext(ctx, overviewStatusSQL, sqlTime(now)).Scan(
-		&d.Stats.Total, &d.Stats.Revoked, &d.Stats.Expired, &d.Stats.Unused,
-		&d.Stats.Unbound, &d.Stats.Active) != nil {
-		return errDatabase
-	}
-
 	t := now.In(beijing)
 	midnight := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, beijing)
 	o.Trend = emptyTrend(now)
-	rows, err := tx.QueryContext(ctx, overviewSalesSQL, sqlTime(midnight.AddDate(0, 0, -6)), sqlTime(midnight.AddDate(0, 0, 1)))
+	rows, err := tx.QueryContext(ctx, overviewCombinedSQL, sqlTime(now),
+		sqlTime(midnight.AddDate(0, 0, -6)), sqlTime(midnight.AddDate(0, 0, 1)))
 	if err != nil {
 		return errDatabase
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var summary, cards, orders int
+		var summary, cards, orders, total, revoked, expired, unused, unbound, active int
 		var day sql.NullInt32
 		var cents int64
-		if rows.Scan(&summary, &day, &cards, &orders, &cents) != nil {
+		if rows.Scan(&summary, &day, &cards, &orders, &cents, &total, &revoked,
+			&expired, &unused, &unbound, &active) != nil {
 			return errDatabase
 		}
 		if summary == 1 {
 			d.Stats.Orders, d.Stats.ManualCents = orders, cents
+			d.Stats.Total, d.Stats.Revoked, d.Stats.Expired = total, revoked, expired
+			d.Stats.Unused, d.Stats.Unbound, d.Stats.Active = unused, unbound, active
 			continue
 		}
 		if day.Valid {
