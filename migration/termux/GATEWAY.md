@@ -731,3 +731,47 @@ reset refusal without extra history/audit events. CI requires
 V2_RECOVERY_HISTORY_APPEND_ONLY along with the existing independent
 cluster and source-unchanged markers. No runtime or security
 behavior changed. New tests await CI; no deployment or phone action.
+
+### Offline log archive candidate and independent recovery pass
+
+CI 46133768853 (head f272ec8, checkout 0e38df0) passed 13/13.
+Standalone job 140944473180 explicitly passed encrypted V2 recovery,
+append-only signing/audit history, independent PG18 recovery with
+fresh roles/TLS/CSRF, and source business state unchanged. The small
+synthetic second-cluster recovery took 6.177s; not a production RTO
+or physical host recovery. Both strict capacity profiles passed
+(100k overview 349.2/342.1ms, orders 212.0/190.1ms); all four
+mixed phases passed. Prior intermittent capacity misses remain
+recorded. Gateway lifecycle and 13-entry package checks passed.
+
+The default retention command remains read-only. The new explicit
+archive-offline mode requires a separate reviewed maintenance window,
+a stopped M4 controller and database, an intact private managed
+tree, controller/control/service exclusive leases, no postmaster.pid,
+and exact pg_ctl status exit 3. It does not stop or start anything.
+It refuses an absent/changed current collector pointer, protects the
+last recorded active log and newest seven logs, excludes the legacy
+log, and processes only eligible logs at least seven days old.
+It archives each candidate to a private SHA256-named gzip, never
+overwrites an archive, fsyncs the file and archive directory/parent,
+reads back and checks exact plaintext, rechecks stopped state and
+eligibility, source inode/metadata/content, then removes that source
+and fsyncs the log directory. A valid existing archive supports
+resuming an interrupted maintenance run; invalid archive denies
+cleanup. Limits: 16 MiB per file and 32 MiB source bytes per run,
+minimum 1 GiB free plus candidate size. An oversized oldest
+candidate stops the batch, not a reason to bypass safety.
+
+This is a cooperative offline mechanism, not protection from a
+same-UID actor or manual pg_ctl ignoring the managed locks.
+A local gzip is not encrypted, off-device disaster recovery or a
+hard disk quota; actual net space saved depends on compression.
+Archives require separately reviewed retention/transfer; no automatic
+pruning, boot entry, schedule, online cleanup or real-device action.
+If the collector pointer disappears on actual clean shutdown, the
+tool holds rather than guessing which log is safe. Directory fsync
+must succeed; Termux filesystem behavior and real stopped PG18
+maintenance remain unverified. CI exercises simulated stopped/active
+status, lock conflicts, PID marker, missing pointer, corrupt/valid
+existing archive, idempotent retry and protected source preservation.
+Do not run the destructive mode on the current endurance device.
