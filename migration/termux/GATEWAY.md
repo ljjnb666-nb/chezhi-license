@@ -256,3 +256,47 @@ the reviewed previous configuration and perform controlled rollback.
 Do not truncate open legacy logs or restart an unidentified cluster.
 The TLS renewal itself remains a separate coordinated operation;
 no automatic certificate replacement or production change is included.
+
+### Encrypted off-device recovery candidate
+
+CI 46121882904 (head 296d5f8, checkout 7eb1164) passed all 13 jobs,
+including actual isolated PG18 collector rotation with unchanged
+postmaster. The candidate repeated dashboard target passed, but mixed
+reads returned 13/320 HTTP 503 and the standalone target missed.
+
+The new encrypted-export.sh operates only on an existing verified
+managed daily logical archive. It acquires the daily backup lock,
+validates the exact manifest and marker, lists and fully decodes the
+archive, checks available storage, encrypts to a reviewed native age
+public recipient, rechecks the source checksum, and publishes a
+ciphertext-only export directory under ~/.chezhi-encrypted-exports.
+No network transfer, database write, key generation or retention
+deletion is performed. Failed encrypted partials remain for inspection.
+The age recipient must be independently verified with the receiver;
+never place its private decryption identity on the phone.
+
+The receiver-side encrypted-receive.sh requires age, compatible
+pg_restore and a private identity file. Use encrypted receiver storage
+and a fresh private output directory. It checks the ciphertext
+manifest, authenticates decryption, fully decodes the archive and
+publishes the recovered logical dump only after verification. On
+failure it unlinks its temporary plaintext; unlinking is not guaranteed
+secure erasure. It never connects to or restores a database.
+The receiver must verify the ciphertext digest from an independently
+authenticated channel: age recipient encryption does not authenticate
+the sender, and a manifest alone is not a signature.
+
+The isolated PG18 CI test exercises a real synthetic database dump,
+age encryption, wrong identity rejection, tampering even with a
+rewritten checksum, duplicate destination refusal and a real restore
+to a separate disposable database with matching rows. The fixture
+does not include production data or test a full licensing disaster
+recovery. Logical dumps omit signing private keys, role credentials,
+TLS private keys and operational configuration. A complete recovery
+plan needs separately protected recovery materials or an approved
+signing rotation, reviewed grants, deployment-scope recovery, and
+independent signed-client checks. No cloud storage, automatic transfer,
+backup schedule or remote identity provisioning is authorized.
+Retain the original M4 daily backup, existing key material and phone
+endurance unchanged. Actual off-device storage and recovery still
+require explicit operator approval and physical verification.
