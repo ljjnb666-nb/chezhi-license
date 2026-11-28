@@ -391,11 +391,13 @@ jobs:
           CHEZHI_TEST_POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
           CHEZHI_TEST_CONTAINER_IMAGE: chezhi-server:ci
           CHEZHI_TEST_GATEWAY_BINARY: ./bin/chezhi-gateway
+          CHEZHI_TEST_GATEWAY_PACED: '1'
           CHEZHI_TEST_CADDY_IMAGE: caddy:2.11.4-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
         run: |
           set -euo pipefail
           python3 migration/server_acceptance.py ./bin/chezhi-server | tee bin/standalone-acceptance.txt
           grep -F 'PASS GATEWAY_REAL_V2' bin/standalone-acceptance.txt
+          grep -F 'PASS GATEWAY_PACED' bin/standalone-acceptance.txt
       - if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
