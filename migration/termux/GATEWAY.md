@@ -913,3 +913,27 @@ per-trial resource deltas and query-plan evidence; further optimization
 requires correctness regression and repeated strict profiles.
 Observer durable delivery, package integration, and Termux verification
 remain open. Deployment remains HOLD; no phone action.
+
+### Observer package candidate and resource evidence
+
+CI 46138386183 on 213f0e7 completed 13/13; both strict candidate
+100k overview profiles passed at 342.0 / 333.3 ms, with zero requests
+over 500 ms in the recorded overview samples. Candidate overview-combined
+representative SQL plans took 42.57 / 42.31 ms. Across the six measured
+100k candidate trials, host CPU PSI some time was approximately 90–94%
+of elapsed time, host idle ticks were low, and harness cgroup throttling
+and host IO/memory PSI deltas were zero. This supports CPU competition
+as a hypothesis, not attribution of the previous failed run; it does
+not establish sustained capacity. Keep the 500 ms gate and earlier
+failure records. No production query change.
+
+The new local-only maintenance archive candidate requires exactly 14
+entries (13 payloads plus SHA256SUMS), now including
+gateway-status-observer.py. The current verifier deliberately rejects
+the old 13-entry layout; verify historical packages with their original
+checkout verifier, not by weakening the current allowlist. CI tests
+missing and tampered observer payloads and executes the staged observer
+self-tests after package integrity checks. Packaging is not installation
+or deployment; no automatic observer service or external notifications.
+The observer still uses in-memory state only. Persistent delivery,
+monitor liveness and actual Android/Termux verification remain open.
