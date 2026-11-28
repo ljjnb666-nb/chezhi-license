@@ -884,3 +884,32 @@ No persistent delivery, restart deduplication or exact event replay.
 The consumer reads no credentials, sends no network requests and
 does not write to the producer directory. CI and Termux verification
 remain required before packaging or operational use.
+
+### Performance gate reopened (M7-D)
+
+CI 46137843044 on 7ca4c7f: 12/13 jobs passed, including five
+observer self-tests and the existing 13-entry local package verifier.
+The dashboard comparison job failed on the second optimized profile.
+100k overview median trial P95: 483.7 / 524.5 ms (strict target 500 ms).
+Per-trial P95 values: 483.7, 530.7, 475.2 and 481.8, 538.0, 524.5 ms.
+Both candidate mixed 100k phases returned 320/320 successful reads,
+one first-attempt issuance and one successful activation. No increase
+in recorded admission rejections or pool waits; sampled lock peak zero.
+Post-load representative overview-combined plans: 52.32 / 56.53 ms,
+2713 shared hits, no shared reads or temp writes. These are single-query
+post-load plans, not concurrent request timings. Do not infer that SQL,
+CPU contention, TLS, application overhead or the runner is exonerated.
+Earlier successful retries do not erase this miss.
+
+The benchmark now emits BENCHMARK_RESOURCES around each measured load:
+monotonic elapsed time, harness process CPU, optional host /proc/stat,
+host PSI and harness cgroup v2 CPU counters. Missing or decreasing
+counters are omitted, not zero. Host counters are not process-specific;
+the harness cgroup need not include the database container. No new
+database requests or sampling threads within the measured workload,
+no change to concurrency, SLO, assertion, warmups or retries. Evidence
+collection is diagnostic, not an alternative gate. Next compare
+per-trial resource deltas and query-plan evidence; further optimization
+requires correctness regression and repeated strict profiles.
+Observer durable delivery, package integration, and Termux verification
+remain open. Deployment remains HOLD; no phone action.
