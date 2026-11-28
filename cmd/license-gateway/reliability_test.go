@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/x509"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -84,4 +85,54 @@ func TestTLSStatusTrustAndWarning(t *testing.T) {
 	near:=&x509.Certificate{NotAfter:time.Now().Add(24*time.Hour)}
 	if err:=tlsStatus(up.Listener.Addr().String(),roots,near);err==nil {t.Fatal("missing expiry warning")}
 	if err:=tlsStatus(up.Listener.Addr().String(),x509.NewCertPool(),future);err==nil {t.Fatal("untrusted origin accepted")}
+}
+
+func TestListenerSaturationReleaseAndShutdown(t *testing.T) {
+	raw,err:=net.Listen("tcp","127.0.0.1:0")
+	if err!=nil {t.Fatal(err)}
+	l:=&limitedListener{Listener:raw,slots:make(chan struct{},1),done:make(chan struct{})}
+	defer l.Close()
+	type result struct{c net.Conn;err error}
+	accept:=func() <-chan result {
+		out:=make(chan result,1)
+		go func(){c,err:=l.Accept();out<-result{c,err}}()
+		return out
+	}
+	get:=func(ch <-chan result) result {
+		t.Helper()
+		select {
+		case r:=<-ch:return r
+		case <-time.After(3*time.Second):t.Fatal("accept did not finish");return result{}
+		}
+	}
+	first:=accept()
+	c1,err:=net.DialTimeout("tcp",raw.Addr().String(),time.Second)
+	if err!=nil {t.Fatal(err)}
+	defer c1.Close()
+	a:=get(first)
+	if a.err!=nil {t.Fatal(a.err)}
+	defer a.c.Close()
+	second:=accept()
+	c2,err:=net.DialTimeout("tcp",raw.Addr().String(),time.Second)
+	if err!=nil {t.Fatal(err)}
+	defer c2.Close()
+	select {
+	case unexpected:=<-second:
+		if unexpected.c!=nil {unexpected.c.Close()}
+		t.Fatal("accepted beyond connection budget")
+	case <-time.After(100*time.Millisecond):
+	}
+	a.c.Close()
+	a.c.Close() // double close must not free the slot twice
+	b:=get(second)
+	if b.err!=nil {t.Fatal(b.err)}
+	defer b.c.Close()
+	if len(l.slots)!=1 {t.Fatal("slot accounting mismatch")}
+	third:=accept()
+	if err:=l.Close();err!=nil {t.Fatal(err)}
+	closed:=get(third)
+	if closed.c!=nil {closed.c.Close();t.Fatal("accepted after listener closed")}
+	if closed.err==nil {t.Fatal("missing shutdown error")}
+	b.c.Close()
+	if len(l.slots)!=0 {t.Fatal("connection slot leaked")}
 }
