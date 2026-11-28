@@ -34,7 +34,7 @@ if [ "$1" = install ]; then
     bash_path="$(command -v bash)"
     printf '#!%s\nexec 9>&-\nexec 2>&1\nexec "%s" "%s/code/gateway-service.sh" run\n' "$bash_path" "$bash_path" "$ctl" > "$ctl/service/run"
     printf '#!%s\nexec 9>&-\nsleep 10\n' "$bash_path" > "$ctl/service/finish"
-    printf '#!%s\nexec 9>&-\nexec svlogd -tt "%s/log"\n' "$bash_path" "$ctl" > "$ctl/service/log/run"
+    printf '#!%s\nexec 9>&-\nexec 6>"%s/logger.lock"\nflock -n 6 || exit 1\nexec svlogd -tt "%s/log"\n' "$bash_path" "$ctl" "$ctl" > "$ctl/service/log/run"
     chmod 700 "$ctl/service/run" "$ctl/service/finish" "$ctl/service/log/run"
     printf 's1048576\nn5\n' > "$ctl/log/config"
     printf 'gateway-local-v2\n' > "$ctl/installed"
@@ -55,7 +55,7 @@ verify_credentials() {
     openssl verify -CAfile "$ctl/credentials/tls-cert" -verify_ip 127.0.0.1 "$ctl/credentials/tls-cert" >/dev/null 2>&1 || die 'Invalid gateway TLS certificate.'
 }
 # Separate controller and service leases; do not guess orphan PIDs.
-for lock in operation controller service; do
+for lock in operation controller service logger; do
     file="$ctl/$lock.lock"
     [ ! -L "$file" ] && { [ ! -e "$file" ] || [ -f "$file" ]; } || die 'Invalid lease file.'
 done
@@ -74,6 +74,7 @@ case "$1" in
         exec 9>"$ctl/controller.lock"
         flock -n 9 || die 'Controller already running.'
         lease_free service || die 'Orphan gateway service lease held; inspect manually.'
+        lease_free logger || die 'Orphan gateway logger lease held; inspect manually.'
         if sv status "$ctl/service" >/dev/null 2>&1; then
             die 'Unexpected native supervisor; inspect manually.'
         fi
@@ -82,11 +83,14 @@ case "$1" in
         ;;
     stop)
         exec 7>"$ctl/operation.lock"
-        flock -w 10 7 || die 'Controller operation busy.'
+        # Another stop may need 10s startup wait + 45s native exit +
+        # 10s controller release. Allow its bounded shutdown to finish.
+        flock -w 75 7 || die 'Controller operation busy; shutdown may still be in progress.'
         # A concurrent start may not have created its control FIFO yet.
         for attempt in $(seq 1 10); do
             if lease_free controller; then
                 lease_free service || die 'Orphan gateway service lease held; inspect manually.'
+                lease_free logger || die 'Orphan gateway logger lease held; inspect manually.'
                 if sv status "$ctl/service" >/dev/null 2>&1; then
                     die 'Native supervisor without controller lease; inspect manually.'
                 fi
@@ -98,7 +102,8 @@ case "$1" in
         done
         sv -w 45 exit "$ctl/service" || die 'Gateway shutdown incomplete; inspect status.'
         flock -w 10 "$ctl/controller.lock" true || die 'Gateway controller still running.'
-        lease_free service || die 'Gateway service lease remains held; inspect manually.'
+        flock -w 5 "$ctl/service.lock" true || die 'Gateway service lease remains held; inspect manually.'
+        flock -w 5 "$ctl/logger.lock" true || die 'Gateway logger lease remains held; inspect manually.'
         printf 'Gateway controller stopped; original M4 services untouched.\n'
         ;;
     status)
