@@ -56,12 +56,21 @@ test -f "$tmp/orphan-ready"
 if ctlcmd start; then echo 'orphan service start accepted'; exit 1; fi
 if ctlcmd stop; then echo 'orphan service reported stopped'; exit 1; fi
 kill "$orphan"; wait "$orphan" || true; orphan=''
+# A surviving logger is independently fenced even when no service lives.
+rm -f "$tmp/orphan-ready"
+bash -c 'exec 6>"$1"; flock -n 6; touch "$2"; exec sleep 60' _ "$ctl/logger.lock" "$tmp/orphan-ready" & orphan=$!
+for i in $(seq 1 10); do [ -f "$tmp/orphan-ready" ] && break; sleep 1; done
+test -f "$tmp/orphan-ready"
+if ctlcmd start; then echo 'orphan logger start accepted'; exit 1; fi
+if ctlcmd stop; then echo 'orphan logger reported stopped'; exit 1; fi
+kill "$orphan"; wait "$orphan" || true; orphan=''
 bash "$tmp/package/gateway-service.sh" start & parent=$!
 for i in $(seq 1 20); do [ -s "$HOME/fixture-pid" ] && break; sleep 1; done
 old="$(cat "$HOME/fixture-pid")"
 [ "$(cat "/proc/$parent/comm")" = runsv ]
 if flock -n "$ctl/controller.lock" true; then echo 'runsv did not retain controller lease'; exit 1; fi
 if flock -n "$ctl/service.lock" true; then echo 'gateway did not retain service lease'; exit 1; fi
+if flock -n "$ctl/logger.lock" true; then echo 'logger did not retain logger lease'; exit 1; fi
 ctlcmd status | grep -q 'run: '
 if ctlcmd start; then echo 'duplicate controller accepted'; exit 1; fi
 sv term "$ctl/service"
@@ -81,12 +90,17 @@ done
 # Two stop callers must serialize and both report a safe stop.
 ctlcmd stop & stop_a=$!
 ctlcmd stop & stop_b=$!
-wait "$stop_a"
-wait "$stop_b"
+# Preserve both outcomes; a timeout is a failure, not a successful stop.
+status_a=0; status_b=0
+wait "$stop_a" || status_a=$?
+wait "$stop_b" || status_b=$?
+printf 'GATEWAY_CONCURRENT_STOP first=%s second=%s\n' "$status_a" "$status_b"
+[ "$status_a" -eq 0 ] && [ "$status_b" -eq 0 ]
 wait "$parent"
 parent=''
 flock -n "$ctl/controller.lock" true
 flock -n "$ctl/service.lock" true
+flock -n "$ctl/logger.lock" true
 ctlcmd stop
 sleep 2
 [ "$(cat "$HOME/fixture-pid")" = "$new" ]
@@ -106,6 +120,7 @@ wait "$parent"
 parent=''
 flock -n "$ctl/controller.lock" true
 flock -n "$ctl/service.lock" true
+flock -n "$ctl/logger.lock" true
 printf 'tamper\n' >> "$ctl/code/chezhi-gateway-android-arm64"
 if ctlcmd start; then echo 'tampered code accepted'; exit 1; fi
 printf 'PASS GATEWAY_SERVICE isolated runit restart, rotation, duplicate denial, controlled stop, direct ownership, simulated orphan hold, concurrent stop, startup stop, M4 preservation and tamper refusal\n'
