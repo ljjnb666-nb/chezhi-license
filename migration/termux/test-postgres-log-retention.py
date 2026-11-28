@@ -116,7 +116,20 @@ class RetentionTests(unittest.TestCase):
             self.assertEqual(len(list(logs.iterdir())),10)
             self.assertEqual(corrupt.read_bytes(),b"invalid gzip")
             corrupt.unlink()
+            # Simulate interruption after a durable archive was published
+            # but before the original was removed. Resume without overwrite.
+            corrupt.write_bytes(gzip.compress(content))
+            corrupt.chmod(0o600)
+            previous_archive=corrupt.read_bytes()
+            pointer=pg/"current_logfiles"
+            saved=pointer.read_bytes()
+            pointer.unlink()
+            with self.assertRaises(OSError):
+                retention.archive_offline(root,now,status=lambda:3)
+            self.assertTrue(files[1].exists())
+            pointer.write_bytes(saved)
             result=retention.archive_offline(root,now,status=lambda:3)
+            self.assertEqual(corrupt.read_bytes(),previous_archive)
             self.assertEqual(result["archived"],2)
             self.assertEqual(result["remaining_eligible"],0)
             self.assertEqual(result["removed_bytes"],18)
