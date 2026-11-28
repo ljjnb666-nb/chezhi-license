@@ -413,7 +413,10 @@ def measure_dashboard_http(a,b,cookie,sql,diagnostics):
     def stats(client):
         code,_,body=client.request("/metrics")
         assert code==200
-        return {key:int(value) for key,value in re.findall(r"^(chezhi_db_[a-z_]+) (\d+)$",body,re.M)}
+        values={key:int(value) for key,value in re.findall(r"^(chezhi_db_[a-z_]+) (\d+)$",body,re.M)}
+        for group,value in re.findall(r'^chezhi_admission_rejected_total\{group="([a-z_]+)"\} (\d+)$',body,re.M):
+            values["admission_"+group]=int(value)
+        return values
     def perc(values,percent):
         values=sorted(values)
         return values[(percent*len(values)+99)//100-1]
@@ -498,6 +501,7 @@ def measure_dashboard_http(a,b,cookie,sql,diagnostics):
 
         if benchmark:
             csrf=a.csrf("/?view=issue",cookie)
+            mixed_before=[stats(diag) for diag in diagnostics]
             started,sampled,finished=Event(),Event(),Event()
             lock_samples=[]
             def observe():
@@ -521,6 +525,7 @@ def measure_dashboard_http(a,b,cookie,sql,diagnostics):
                         return outcomes
                     assert status in (429,503),status
                     time.sleep(0.025)
+                print(f"MIXED_ISSUE_EXHAUSTED cards={amount} issue_responses={dict(outcomes)}",flush=True)
                 raise AssertionError("mixed benchmark could not issue a card")
 
             with ThreadPoolExecutor(18) as pool:
@@ -534,6 +539,10 @@ def measure_dashboard_http(a,b,cookie,sql,diagnostics):
                 finally:
                     finished.set()
                 observed.result()
+            mixed_after=[stats(diag) for diag in diagnostics]
+            for index,(old,new) in enumerate(zip(mixed_before,mixed_after)):
+                delta={key:new[key]-old[key] for key in new if key.startswith("admission_") and key in old}
+                print(f"MIXED_ADMISSION cards={amount} instance={index+1} counters={delta or 'not available in historical baseline'}",flush=True)
             assert sampled.is_set()
             status=Counter(event[1] for event in mixed)
             print(f"MIXED cards={amount} reads={len(mixed)} responses={dict(status)} "
