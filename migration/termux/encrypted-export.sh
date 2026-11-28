@@ -48,6 +48,7 @@ age -r "$recipient" -o "$work/database.dump.age" "$src/database.dump"
 (cd "$work" && sha256sum database.dump.age > SHA256SUMS)
 printf '%s\n' 'encrypted logical database only; receiver decryption/restore not verified' > "$work/NOTICE"
 [ ! -e "$target" ] && [ ! -L "$target" ] || die 'Export target appeared.'
-mv -T -- "$work" "$target"
+mv -nT -- "$work" "$target"
+[ ! -e "$work" ] || die 'Output collision; existing target preserved.'
 trap - EXIT
 printf 'ENCRYPTED_EXPORT_OK date=%s ciphertext_bytes=%s\n' "$day" "$(stat -c %s "$target/database.dump.age")"
