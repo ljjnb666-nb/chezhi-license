@@ -94,18 +94,19 @@ class Observer:
         if current is None:
             events = [] if self.unavailable else ["STATUS_UNAVAILABLE"]
             self.unavailable = True
-            self.last = None
             return events
         previous = self.last
         events = []
-        if self.unavailable:
+        gap = self.unavailable
+        same = previous is not None and previous["started_utc"] == current["started_utc"]
+        if previous is not None and (stamp(current["observed_utc"]) < stamp(previous["observed_utc"])
+                or stamp(current["started_utc"]) < stamp(previous["started_utc"])
+                or (stamp(current["observed_utc"]) == stamp(previous["observed_utc"]) and current != previous)
+                or (same and previous["lifecycle"] == "STOPPING" and current["lifecycle"] == "OBSERVING")):
+            return self.update(None)
+        if gap:
             events.append("STATUS_AVAILABLE_NOT_READY")
             self.unavailable = False
-        same = previous is not None and previous["started_utc"] == current["started_utc"]
-        if same and (stamp(current["observed_utc"]) < stamp(previous["observed_utc"])
-                     or (current["observed_utc"] == previous["observed_utc"] and current != previous)
-                     or (previous["lifecycle"] == "STOPPING" and current["lifecycle"] == "OBSERVING")):
-            return self.update(None)
         if previous is None or not same:
             events.append("OBSERVATION_STARTED_NOT_READY" if previous is None else "GENERATION_CHANGED_NOT_READY")
         if current["lifecycle"] == "STOPPING":
@@ -113,7 +114,7 @@ class Observer:
                 events.append("STOPPING_NOT_READY")
         else:
             for key, label in (("alert_5xx_open", "HTTP_5XX"), ("alert_429_open", "HTTP_429")):
-                continuous = same and previous["lifecycle"] == "OBSERVING"
+                continuous = same and not gap and previous["lifecycle"] == "OBSERVING"
                 if current[key] and (not continuous or not previous[key]):
                     events.append(label + "_OPEN")
                 elif continuous and previous[key] and not current[key]:
@@ -192,6 +193,7 @@ class Tests(unittest.TestCase):
         self.assertEqual(o.update({**changed, "lifecycle": "STOPPING",
                                    "observed_utc": "2026-11-28T12:02:00Z"}), ["STOPPING_NOT_READY"])
         self.assertEqual(o.update(changed), ["STATUS_UNAVAILABLE"])
+        self.assertEqual(o.update(changed), [])  # older generation/sample stays rejected
 
 
 def main():
