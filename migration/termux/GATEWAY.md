@@ -522,3 +522,32 @@ job. Preserve separate text logs and plan JSON, including the
 repeat directory. This is a strengthened synthetic regression gate,
 not sustained physical-device or Cloudflare capacity acceptance.
 No additional SQL, application admission, quota or phone changes.
+
+### Strict capacity failure and shared order keys
+
+CI 46129021921 (head 34d57e7, checkout c8b33c7) passed 12/13.
+Both independently initialized strict profiles failed solely the
+repeated latency target: 100k overview/order P95 581.7/553.6ms
+and 580.1/509.4ms. All four mixed phases passed (1280/1280
+reads, four first-attempt issues and activations, zero admission
+reject increments). Standalone single-trial target passed. The
+strict gate must remain unchanged. Combined overview plans took
+63.76/64.05ms with no temp writes. Default order count and page
+separately took 32.14/30.45ms and 32.00/30.58ms.
+
+The new default order SQL materializes the exact ref/max(position)
+keys once and shares them between count and clamped page selection.
+The foreign key guarantees matching orders; details are computed
+only for the selected page. A sentinel represents zero orders.
+No schema migration, caching or approximate count; filtered orders
+retain the old implementation. Tests cover empty and 23-order
+fixtures, navigation links, invalid/overflowing page input and
+last-page clamping, plus exclusion of an empty order. Overview
+aggregation removes redundant predicates using the existing
+constraint that unactivated cards have NULL expiry and derives
+active as the exact complement of four disjoint status buckets.
+The existing projection parity tests remain authoritative. Added
+actual-query EXPLAIN capture alongside the previous separate
+order count/page samples. Materialization and aggregation may have
+memory or spill costs; new CI results are required before claiming
+a gain. No deployment, merge, external access or phone changes.
