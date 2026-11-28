@@ -2,7 +2,7 @@ name: CheZhi License CI
 
 on:
   pull_request:
-    branches: [main, feature/p6-termux-staging]
+    branches: [main, feature/p6-termux-staging, feature/m5-m6-local-api-gateway]
   push:
     branches: [main]
   workflow_dispatch:
