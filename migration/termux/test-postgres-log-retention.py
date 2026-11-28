@@ -79,7 +79,12 @@ class RetentionTests(unittest.TestCase):
             ctl=root/"managed-v1"
             pg.mkdir(mode=0o700)
             ctl.mkdir(mode=0o700)
-            (ctl/"installed").write_text("managed-v1\n")
+            marker=ctl/"installed"
+            os.mkfifo(marker,0o600)
+            with self.assertRaises(ValueError):
+                retention.archive_offline(root,now,status=lambda:3)
+            marker.unlink()
+            marker.write_text("managed-v1\n")
             logs=pg/"chezhi-pg-log"
             logs.mkdir(mode=0o700)
             legacy=root/"postgres.log"
