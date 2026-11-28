@@ -30,6 +30,15 @@ def private_dir(path):
     if not stat.S_ISDIR(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o700 or info.st_uid != os.getuid():
         raise ValueError("invalid private directory")
 
+def verify_marker(path, expected):
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, "rb") as stream:
+        info = os.fstat(stream.fileno())
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                or info.st_nlink != 1 or info.st_size != len(expected)
+                or stream.read(len(expected)+1) != expected):
+            raise ValueError("invalid maintenance marker")
+
 def current(pg):
     # Never follow a symlink or read arbitrary file contents.
     fd = os.open(pg / "current_logfiles", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
@@ -99,8 +108,7 @@ def offline(root, status=None):
     private_dir(pg)
     ctl = root / "managed-v1"
     private_dir(ctl)
-    if (ctl / "installed").is_symlink() or (ctl / "installed").read_bytes() != b"managed-v1\n":
-        raise ValueError("managed controller marker invalid")
+    verify_marker(ctl / "installed", b"managed-v1\n")
     def check():
         if os.path.lexists(pg / "postmaster.pid"):
             raise ValueError("database PID marker present")
@@ -194,6 +202,9 @@ def archive_offline(root, now, status=None):
                     decoded=zipped.read(size+1)
                 if decoded!=data:
                     raise ValueError("archive verification failed")
+                # A reused archive may originate from an interrupted run.
+                # Flush its inode as well as the directory before unlink.
+                os.fsync(raw.fileno())
             check()
             _, eligible = inventory(root,now,selected=True)
             latest=original.lstat()
@@ -217,10 +228,7 @@ if __name__ == "__main__":
             raise ValueError("use private Termux ARM64 home")
         root = Path(os.environ["HOME"]) / ".chezhi-license-staging"
         private_dir(root)
-        marker = root / "initialized"
-        info = marker.lstat()
-        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_size > 64 or marker.read_text() != "loopback-staging-v1\n":
-            raise ValueError("staging marker invalid")
+        verify_marker(root / "initialized", b"loopback-staging-v1\n")
         if sys.argv[1:]:
             result = archive_offline(root, time.time())
             print(json.dumps(result, sort_keys=True))
