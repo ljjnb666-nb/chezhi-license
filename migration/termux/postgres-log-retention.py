@@ -22,6 +22,8 @@ AGE = 7 * 86400
 BUDGET = 128 * 1024 * 1024
 MIN_FREE = 1024 * 1024 * 1024
 MAX_FILES = 10000
+MAX_ARCHIVE_FILE = 16 * 1024 * 1024
+MAX_ARCHIVE_BATCH = 32 * 1024 * 1024
 
 def private_dir(path):
     info = path.lstat()
@@ -132,9 +134,9 @@ def file_digest(path, expected=None):
             raise ValueError("invalid protected log")
         if expected is not None and (info.st_mtime, info.st_size) != expected:
             raise ValueError("log changed since inventory")
-        if info.st_size > BUDGET:
+        if info.st_size > MAX_ARCHIVE_FILE:
             raise ValueError("individual log exceeds maintenance batch limit")
-        data = stream.read(BUDGET+1)
+        data = stream.read(MAX_ARCHIVE_FILE+1)
         after = os.fstat(stream.fileno())
         if len(data)!=info.st_size or (after.st_mtime_ns,after.st_size)!=(info.st_mtime_ns,info.st_size):
             raise ValueError("log changed during read")
@@ -152,11 +154,13 @@ def archive_offline(root, now, status=None):
         archives = root / "pg-log-archives"
         archives.mkdir(mode=0o700, exist_ok=True)
         private_dir(archives)
+        # Persist the newly created archive directory before removing any source.
+        sync_dir(root)
         logs = root / "pgdata" / "chezhi-pg-log"
         removed = 0
         count = 0
         for mtime,name,size in reversed(entries):
-            if size > BUDGET or removed+size > BUDGET:
+            if size > MAX_ARCHIVE_FILE or removed+size > MAX_ARCHIVE_BATCH:
                 break
             if shutil.disk_usage(root).free < MIN_FREE + size:
                 raise ValueError("insufficient free space for archive")
@@ -195,11 +199,15 @@ def archive_offline(root, now, status=None):
             latest=original.lstat()
             if (mtime,name,size) not in eligible or (latest.st_dev,latest.st_ino,latest.st_mtime_ns,latest.st_size)!=fingerprint:
                 raise ValueError("source changed before cleanup")
+            # Recheck content, not just metadata, before irreversible unlink.
+            last_data,last_fingerprint=file_digest(original,(mtime,size))
+            if last_fingerprint!=fingerprint or last_data!=data:
+                raise ValueError("source bytes changed before cleanup")
             original.unlink()
             sync_dir(logs)
             count+=1
             removed+=size
-        return dict(result, archived=count, removed_bytes=removed)
+        return dict(result, archived=count, removed_bytes=removed, remaining_eligible=len(entries)-count)
 
 if __name__ == "__main__":
     try:
