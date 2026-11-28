@@ -775,3 +775,37 @@ maintenance remain unverified. CI exercises simulated stopped/active
 status, lock conflicts, PID marker, missing pointer, corrupt/valid
 existing archive, idempotent retry and protected source preservation.
 Do not run the destructive mode on the current endurance device.
+
+### Real PostgreSQL 18 offline archive gate
+
+CI 46134301166 (head 4c70d84, checkout e102cfb) passed 13/13,
+the second consecutive full passing candidate. Gateway job
+140946070130 passed two retention/archival fixture tests and
+the 13-entry ZIP. Standalone independent cluster recovery passed
+again (6.398s tiny synthetic fixture); both strict capacity
+profiles passed (100k overview 333.8/335.4ms, orders 211.6/207.5ms).
+Previous performance misses remain evidence of variability.
+
+The new PG18 fixture builds a disposable compatibility image
+with Python 3, runs as postgres with no network or published
+ports, initializes a private cluster, enables the native collector,
+creates a synthetic database sentinel and ten aged synthetic log
+files. Actual running PG must refuse archive. After actual clean
+pg_ctl stop, if current_logfiles persists, the real maintenance
+function must archive eligible files, verify gzip readback, leave
+every protected file unchanged and allow idempotent retry. If
+the native pointer is absent, explicit PG18_OFFLINE_POINTER_ABSENT_HOLD
+and unchanged files are mandatory; that outcome is not a cleanup
+PASS. In both cases restart must recover the sentinel. CI records
+distinct outcomes in pg18-offline-archive.txt and removes the test
+container on exit. No mock pg_ctl or production data.
+Image preparation uses the Alpine package mirror; runtime is isolated.
+The fixture ages synthetic log files, not actual historical phone data.
+
+Maintenance marker reads are now bounded nonblocking regular-file
+reads with no symlink following; FIFO marker refusal is tested.
+A verified reused archive also receives an inode fsync before
+unlinking source. No new runtime gateway or SQL changes, no
+scheduled cleanup, remote log transfer, archive encryption or hard
+disk cap. Actual Termux directory fsync and live phone maintenance
+are still unverified. Do not interrupt the endurance device.
