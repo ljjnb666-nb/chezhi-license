@@ -179,7 +179,8 @@ Use a second session for status and controlled shutdown:
     bash migration/termux/supervisor.sh stop
     bash migration/termux/staging.sh stop-db
 
-The foreground controller starts two private runsv processes. Each
+The foreground controller starts three private runsv processes (application,
+backup and health). Each
 application launch retains the existing staging service lock, checks the
 installed binary digest and DB runtime grants, and starts the existing
 PostgreSQL cluster if needed. runit restarts a failed application after
@@ -190,14 +191,20 @@ launching an overlapping child. Controlled stop stops managed children,
 leaving PostgreSQL running for explicit shutdown. If stop times out,
 inspect the actual process and lock state; never kill arbitrary PIDs.
 
-Service and backup logs use svlogd, approximately 1 MiB per segment and
-five retained rotated segments for each service. PostgreSQL's original
+Application, backup and health logs use svlogd, approximately 1 MiB per
+segment and five retained rotated segments for each service. PostgreSQL's original
 postgres.log is not rotated by this candidate; monitor disk usage and
 plan a separately reviewed DB logging change. Status checks readiness
 with the existing TLS certificate and warns when it expires within
-seven days. Health failures without process exit and postmaster loss
-while the app remains alive are not automatically repaired in this
-candidate. No Android process-survival guarantee or forced wake lock.
+seven days. The health watchdog checks certificate-verified readiness every 15 seconds
+plus request time. Four consecutive failures can request TERM through the
+private runit service, serialized with operator shutdown; the existing
+service restart path then checks PostgreSQL. A cooldown of eight probe
+cycles limits recovery requests. Invalid local certificate verification
+holds recovery rather than retrying TERM. No forced kill is performed;
+a child that ignores TERM, other trust failures or a persistent database
+fault need operator diagnosis. No Android process-survival guarantee or
+forced wake lock.
 
 The backup service checks every 15 minutes, producing at most one
 completed logical archive per UTC date in managed-daily. The archive
@@ -225,6 +232,7 @@ and unlock on the physical device. The Linux CI fixture exercises real
 runit with a synthetic service and synthetic archive utilities; it is
 not an Android or PostgreSQL restore test. Field gates: verify installed
 script digests, manual-service exclusion, service termination/restart,
-controlled stop without relaunch, backup scheduling and retention,
+controlled stop without relaunch, readiness failure and certificate hold,
+backup scheduling and retention,
 screen-off/reboot/24h/72h uptime, storage/thermal behavior, and rollback
 to the original foreground staging script. External access remains HOLD.
