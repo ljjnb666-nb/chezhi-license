@@ -348,16 +348,36 @@ def independent_cluster_recovery(root, folder, binary, received, signer, source_
         cli(m,"db-check","--migrator")
         cli(env,success=False)
         cli(r,"db-recover-security",dbname,success=False)
-        before={table:sql(f"SELECT to_jsonb(t)::text FROM chezhi_{table} t ORDER BY to_jsonb(t)::text;")
-                for table in ("cards","secure_bindings","orders","signing_policy","signing_history")}
+        immutable=("cards","secure_bindings","orders","owner","members","plans")
+        def snapshot(table):
+            return sql(f"SELECT to_jsonb(t)::text FROM chezhi_{table} t ORDER BY to_jsonb(t)::text;")
+        before={table:snapshot(table) for table in immutable}
+        prior_history=snapshot("signing_history")
+        prior_history_count=int(sql("SELECT count(*) FROM chezhi_signing_history;"))
+        prior_audit=sql("SELECT to_jsonb(t)::text FROM chezhi_audit t ORDER BY position;")
+        prior_audit_position=int(sql("SELECT coalesce(max(position),0) FROM chezhi_audit;"))
+        prior_policy=sql("SELECT (to_jsonb(t)-'deployment')::text FROM chezhi_signing_policy t;")
         assert int(sql("SELECT count(*) FROM chezhi_challenges;"))>0
+        assert int(sql("SELECT count(*) FROM chezhi_sessions;"))>0
         cli(m,"db-recover-security",dbname)
-        assert sql("SELECT count(*) FROM chezhi_challenges;")=="0"
-        assert sql("SELECT count(*) FROM chezhi_sessions;")=="0"
-        for table in ("cards","secure_bindings","orders","signing_history"):
-            assert sql(f"SELECT to_jsonb(t)::text FROM chezhi_{table} t ORDER BY to_jsonb(t)::text;")==before[table]
+        for table in ("challenges","sessions","rate_limits"):
+            assert sql(f"SELECT count(*) FROM chezhi_{table};")=="0",f"recovery did not clear {table}"
+        for table in immutable:
+            assert snapshot(table)==before[table],f"recovery changed immutable {table}"
         scope,pub=sql("SELECT deployment,public_key FROM chezhi_signing_policy;").split("|")
-        assert scope!=old_scope and pub==public_key
+        assert re.fullmatch(r"[0-9a-f]{64}",scope) and scope!=old_scope and pub==public_key
+        assert sql("SELECT (to_jsonb(t)-'deployment')::text FROM chezhi_signing_policy t;")==prior_policy
+        # Recovery appends one public signing-history event; it must not
+        # rewrite or remove any previous event. Check exact old rows.
+        assert int(sql("SELECT count(*) FROM chezhi_signing_history;"))==prior_history_count+1
+        assert sql(f"SELECT to_jsonb(t)::text FROM chezhi_signing_history t WHERE deployment<>'{scope}' ORDER BY to_jsonb(t)::text;")==prior_history
+        assert sql(f"SELECT public_key,action FROM chezhi_signing_history WHERE deployment='{scope}';")==public_key+"|recovery"
+        assert sql(f"SELECT to_jsonb(t)::text FROM chezhi_audit t WHERE position<={prior_audit_position} ORDER BY position;")==prior_audit
+        assert sql(f"SELECT action,actor FROM chezhi_audit WHERE position>{prior_audit_position} ORDER BY position;")=="security_recovered|admin"
+        cli(m,"db-recover-security",dbname,success=False)
+        assert int(sql("SELECT count(*) FROM chezhi_signing_history;"))==prior_history_count+1
+        assert sql(f"SELECT count(*) FROM chezhi_audit WHERE position>{prior_audit_position};")=="1"
+        print("PASS V2_RECOVERY_HISTORY_APPEND_ONLY exact old history and audit, one recovery event, repeated reset denied",flush=True)
         cli(r,"db-check","--runtime")
         cli(dict(env,CHEZHI_DATABASE_URL=m["CHEZHI_DATABASE_URL"]),success=False)
         tls=ssl.create_default_context(cafile=str(cert))
