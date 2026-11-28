@@ -466,3 +466,30 @@ perpetual active cards, empty orders and filtered/unfiltered pages,
 and plan capture for the new default order path and its prior form.
 Actual performance benefit is not established until CI runs.
 No phone or public service activation.
+
+### Single-scan overview candidate
+
+CI 46127551010 (head 0c85ba9, checkout 548ea97) passed 13/13.
+At 10k and 100k cards mixed reads were 320/320 each, first-attempt
+issuance and zero admission rejection deltas. The 100k repeated
+overview/order P95 was 604.8/590.3ms, single-trial target also missed.
+The default order plan showed 33.72ms and 2746 shared buffer hits
+versus 45.60ms and 39274 hits for its prior form in the same fixture.
+Keep the default order improvement; the filtered path stays unchanged.
+These samples are not a sustained production capacity guarantee.
+
+The new overview candidate groups exact card state counts and order
+quantities together, then joins orders and produces lifetime totals
+and seven-day trend in a single SQL statement. No cache, schema
+migration, approximate count, or additional connection pool. Card
+status counts include test orders; paid amounts/order counts exclude
+them. Orders outside the window contribute to lifetime totals but
+not the trend. The grouping indicator distinguishes lifetime totals
+from NULL day buckets. Foreign keys guarantee card/order association;
+the transaction remains read-only repeatable-read. Added empty,
+test-only and out-of-window parity checks, plus combined query plan
+and default order count plan capture. The previous separate status
+and sales plan samples remain for comparison. Wider hash aggregate
+state can increase memory or spill; inspect temp blocks, HTTP P95,
+resource use and actual parity before retaining this candidate.
+No changes to the frozen physical-device versions.
