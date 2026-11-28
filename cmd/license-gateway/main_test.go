@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/tls"
+	"encoding/json"
 	"crypto/x509"
 	"io"
 	"net/http"
@@ -88,4 +89,55 @@ func TestTrustAndRedirectFailure(t *testing.T) {
 	}
 	if redirects.Load()!=0 { t.Fatal("redirect followed") }
 	if _,err:=newGateway("license.example.invalid","https://192.0.2.1:443",x509.NewCertPool());err==nil { t.Fatal("non-loopback upstream accepted") }
+}
+
+func TestBoundariesAndFailureEnvelopes(t *testing.T) {
+	var calls atomic.Int64
+	up:=httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter,r *http.Request){
+		calls.Add(1)
+		w.Header().Set("Content-Type","application/json")
+		switch r.URL.Path {
+		case "/api/v2/licenses/activate":
+			io.WriteString(w,strings.Repeat("x",maxReply+1))
+		case "/api/v2/licenses/validate":
+			io.WriteString(w,"not JSON")
+		default:
+			io.WriteString(w,`{"version":"v2","data":{}}`)
+		}
+	}))
+	defer up.Close()
+	roots:=x509.NewCertPool()
+	roots.AddCert(up.Certificate())
+	g,err:=newGateway("license.example.invalid",up.URL,roots)
+	if err!=nil {t.Fatal(err)}
+	request:=func(path,body string,length int64,want int){
+		t.Helper()
+		req:=httptest.NewRequest("POST",path,strings.NewReader(body))
+		req.Host=g.host
+		req.TLS=&tls.ConnectionState{}
+		req.Header.Set("Content-Type","application/json")
+		req.ContentLength=length
+		w:=httptest.NewRecorder()
+		g.ServeHTTP(w,req)
+		if w.Code!=want {t.Fatalf("status=%d want=%d",w.Code,want)}
+		var e struct {
+			Version string `json:"version"`
+			ID string `json:"request_id"`
+		}
+		if json.Unmarshal(w.Body.Bytes(),&e)!=nil || e.Version!="v2" || len(e.ID)!=32 || e.ID!=w.Header().Get("X-Request-ID") {
+			t.Fatal("invalid gateway failure envelope")
+		}
+	}
+	for i:=0;i<cap(g.slots);i++ {g.slots<-struct{}{}}
+	request("/api/v2/licenses/renew","{}",2,503)
+	if calls.Load()!=0 {t.Fatal("saturated request reached origin")}
+	for i:=0;i<cap(g.slots);i++ {<-g.slots}
+	request("/api/v2/licenses/renew",strings.Repeat("x",maxBody+1),-1,413)
+	if calls.Load()!=0 {t.Fatal("oversized streaming body reached origin")}
+	request("/api/v2/licenses/activate","{}",2,503)
+	request("/api/v2/licenses/validate","{}",2,503)
+	if calls.Load()!=2 {t.Fatal("origin failure tests did not reach origin")}
+	up.Close()
+	request("/api/v2/licenses/renew","{}",2,503)
+	if len(g.slots)!=0 {t.Fatal("request slots leaked")}
 }
