@@ -226,6 +226,58 @@ def exercise_capacity(folder, a, b, diagnostics, query, scope, card, key, public
     query("DELETE FROM chezhi_rate_limits")
 
 
+def encrypted_recovery_fixture(folder, dump, signer):
+    """Synthetic CI only. Transfer exact encrypted dump/key bytes to a new
+    private receiver directory. Never print or upload fixture secrets."""
+    source = folder / "v2-recovery-sender"
+    receiver = folder / "v2-recovery-receiver"
+    source.mkdir(mode=0o700)
+    receiver.mkdir(mode=0o700)
+    identity, wrong = receiver / "identity", receiver / "wrong-identity"
+    def age(*args, data=None, success=True):
+        result = subprocess.run(list(map(str,args)), input=data, stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL, timeout=30)
+        assert (result.returncode==0)==success, "age fixture unexpected result"
+        return result.stdout
+    age("age-keygen","-o",identity)
+    age("age-keygen","-o",wrong)
+    identity.chmod(0o600)
+    wrong.chmod(0o600)
+    recipient = age("age-keygen","-y",identity).decode("ascii").strip()
+    container = os.environ["CHEZHI_TEST_POSTGRES_CONTAINER"]
+    dump_bytes = subprocess.run(["docker","exec",container,"cat",dump],
+                                stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,
+                                check=True,timeout=30).stdout
+    key_bytes = signer.read_bytes()
+    assert 0<len(dump_bytes)<=16*1024*1024 and 0<len(key_bytes)<=4096
+    def private_write(path,data):
+        with os.fdopen(os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600),"wb") as stream:
+            stream.write(data)
+    def receive(name,plaintext):
+        ciphertext = age("age","-r",recipient,data=plaintext)
+        trusted = sha256(ciphertext).digest()
+        private_write(source / (name+".age"),ciphertext)
+        # Separate receiver copy; trusted digest is retained independently
+        # in the fixture process, not read from the transferred directory.
+        private_write(receiver / (name+".age"),(source / (name+".age")).read_bytes())
+        received = (receiver / (name+".age")).read_bytes()
+        assert sha256(received).digest()==trusted
+        age("age","-d","-i",wrong,data=received,success=False)
+        damaged = received[:-1]+bytes([received[-1]^1])
+        assert sha256(damaged).digest()!=trusted
+        age("age","-d","-i",identity,data=damaged,success=False)
+        decoded = age("age","-d","-i",identity,data=received)
+        assert sha256(decoded).digest()==sha256(plaintext).digest()
+        return decoded
+    recovered_dump = receive("database",dump_bytes)
+    recovered_key = receiver / "signing-key"
+    private_write(recovered_key,receive("signing",key_bytes))
+    assert signer.read_bytes()==key_bytes and recovered_key.stat().st_mode & 0o777 == 0o600
+    # Ciphertext only on the sender/transfer side; the outer private test
+    # directory is cleaned by the existing suite. Not a production key tool.
+    return recovered_dump,recovered_key
+
+
 def run_v2_suite(root, folder, binary, common, migration_env, runtime_env, password,
                  grants, pg, sql, cli, Client, instance, eventually, port, cert_ctx):
     vector()
@@ -362,10 +414,21 @@ def run_v2_suite(root, folder, binary, common, migration_env, runtime_env, passw
         recovery_started=time.perf_counter()
         pg("createdb",restored)
         created_restore=True
-        pg("pg_restore","-d",restored,"--exit-on-error","--single-transaction","--no-owner","--no-acl",dump)
+        encrypted=os.getenv("CHEZHI_TEST_ENCRYPTED_V2_RECOVERY")=="1"
+        recovery_signer=signer
+        if encrypted:
+            received,recovery_signer=encrypted_recovery_fixture(folder,dump,signer)
+            subprocess.run(["docker","exec","-i","-u","postgres",
+                            os.environ["CHEZHI_TEST_POSTGRES_CONTAINER"],
+                            "pg_restore","-U","postgres","-d",restored,"--exit-on-error",
+                            "--single-transaction","--no-owner","--no-acl"],
+                           input=received,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,
+                           check=True,timeout=60)
+        else:
+            pg("pg_restore","-d",restored,"--exit-on-error","--single-transaction","--no-owner","--no-acl",dump)
         restore_seconds=time.perf_counter()-recovery_started
         sql(None,db=restored,stdin=grants)
-        er,rr,dr,_=endpoint(restored,signer)
+        er,rr,dr,_=endpoint(restored,recovery_signer)
         cli(er,success=False)
         assert int(query("SELECT count(*) FROM chezhi_challenges",restored))>0
         before=query("SELECT to_jsonb(t)::text FROM chezhi_secure_bindings t ORDER BY card_id",restored)
@@ -377,6 +440,9 @@ def run_v2_suite(root, folder, binary, common, migration_env, runtime_env, passw
         new_scope,new_pub=trust(restored)
         assert new_scope!=scope and new_pub==public_key
         cli(target(runtime_env,restored),"db-check","--runtime")
+        if encrypted:
+            wrong_signer,_=make_signer("v2-recovery-wrong-"+suffix)
+            cli(dict(er,CHEZHI_SIGNING_KEY_FILE=str(wrong_signer)),success=False)
         with instance(binary,er,dr):
             assert post(rr,"validate",pending,403)=="authorization_denied"
             renewed=post(rr,"renew",prepare(rr,new_scope,"renew",card,k2,p2))
@@ -386,6 +452,8 @@ def run_v2_suite(root, folder, binary, common, migration_env, runtime_env, passw
         print(f"V2_RECOVERY_TIMING dump_seconds={dump_seconds:.3f} restore_create_seconds={restore_seconds:.3f} "
               f"verified_recovery_seconds={time.perf_counter()-recovery_started:.3f}",flush=True)
         print("PASS V2 native logical restore, old challenge rejection, changed scope, preserved secure bindings and revoked state",flush=True)
+        if encrypted:
+            print("PASS V2_ENCRYPTED_RECOVERY exact encrypted fixture dump and signing key transfer, wrong identity/tamper/key denial, recovered signed renewal and revocation",flush=True)
 
         new_signer,new_key=make_signer("v2-rotated-"+suffix)
         old_id=sha256(bytes.fromhex(public_key)).hexdigest()
