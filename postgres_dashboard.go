@@ -46,9 +46,13 @@ func (p *postgresStore) dashboardPage(ctx context.Context, v *View, q url.Values
 	})
 }
 
-const overviewStatusSQL = `SELECT status,count(*) FROM (
-    SELECT ` + cardStatusSQL + ` AS status FROM chezhi_cards c
-) s GROUP BY status`
+const overviewStatusSQL = `SELECT count(*),
+    count(*) FILTER (WHERE c.revoked),
+    count(*) FILTER (WHERE NOT c.revoked AND c.expires<=$1::numeric),
+    count(*) FILTER (WHERE NOT c.revoked AND (c.expires<=$1::numeric) IS NOT TRUE AND c.activated IS NULL),
+    count(*) FILTER (WHERE NOT c.revoked AND (c.expires<=$1::numeric) IS NOT TRUE AND c.activated IS NOT NULL AND c.device=''),
+    count(*) FILTER (WHERE NOT c.revoked AND (c.expires<=$1::numeric) IS NOT TRUE AND c.activated IS NOT NULL AND c.device<>'')
+FROM chezhi_cards c`
 
 // Group quantities before joining orders. Both all-time totals and the trend
 // use that same set of paid orders, with no card-row DISTINCT or second join.
@@ -64,40 +68,18 @@ SELECT grouping(day),day,coalesce(sum(cards),0),count(*),coalesce(sum(cents),0)
 FROM sales GROUP BY GROUPING SETS ((day),())`
 
 func readOverview(ctx context.Context, tx *sql.Tx, now time.Time, d *Dashboard, o *Operations) error {
-	rows, err := tx.QueryContext(ctx, overviewStatusSQL, sqlTime(now))
-	if err != nil {
-		return errDatabase
-	}
-	for rows.Next() {
-		var status string
-		var count int
-		if rows.Scan(&status, &count) != nil {
-			rows.Close()
-			return errDatabase
-		}
-		d.Stats.Total += count
-		switch status {
-		case "已激活":
-			d.Stats.Active = count
-		case "未激活":
-			d.Stats.Unused = count
-		case "已过期":
-			d.Stats.Expired = count
-		case "已吊销":
-			d.Stats.Revoked = count
-		case "已解绑":
-			d.Stats.Unbound = count
-		}
-	}
-	rows.Close()
-	if rows.Err() != nil {
+	// Preserve CASE precedence and NULL expiry semantics without grouping
+	// by localized status strings. All counts come from the same snapshot.
+	if tx.QueryRowContext(ctx, overviewStatusSQL, sqlTime(now)).Scan(
+		&d.Stats.Total, &d.Stats.Revoked, &d.Stats.Expired, &d.Stats.Unused,
+		&d.Stats.Unbound, &d.Stats.Active) != nil {
 		return errDatabase
 	}
 
 	t := now.In(beijing)
 	midnight := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, beijing)
 	o.Trend = emptyTrend(now)
-	rows, err = tx.QueryContext(ctx, overviewSalesSQL, sqlTime(midnight.AddDate(0, 0, -6)), sqlTime(midnight.AddDate(0, 0, 1)))
+	rows, err := tx.QueryContext(ctx, overviewSalesSQL, sqlTime(midnight.AddDate(0, 0, -6)), sqlTime(midnight.AddDate(0, 0, 1)))
 	if err != nil {
 		return errDatabase
 	}
