@@ -592,6 +592,20 @@ jobs:
           set -euo pipefail
           bash -n migration/termux/test-postgres-logging.sh
           timeout 150s bash migration/termux/test-postgres-logging.sh | tee bin/pg18-log-rotation.txt
+      - name: Offline log archive against a real stopped PostgreSQL 18 cluster
+        run: |
+          set -euo pipefail
+          # Only image preparation needs the package mirror; the test has no network.
+          docker build -t chezhi-pg18-offline-fixture:ci - <<'DOCKERFILE'
+          FROM postgres:18.7-alpine
+          RUN apk add --no-cache python3
+          DOCKERFILE
+          timeout 180s docker run --rm --network none --user postgres --entrypoint python3 \
+            --mount "type=bind,source=$PWD/migration/termux,target=/fixture,readonly" \
+            -e PYTHONDONTWRITEBYTECODE=1 chezhi-pg18-offline-fixture:ci \
+            /fixture/test-postgres-offline-archive.py | tee bin/pg18-offline-archive.txt
+          grep -Eq '^PASS PG18_OFFLINE_ARCHIVE actual|^PG18_OFFLINE_POINTER_ABSENT_HOLD ' bin/pg18-offline-archive.txt
+          grep -F 'PASS PG18_OFFLINE_ARCHIVE_RESTART' bin/pg18-offline-archive.txt
       - name: Authenticated encrypted archive and disposable PostgreSQL 18 restore
         run: |
           set -euo pipefail
