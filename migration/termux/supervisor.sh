@@ -3,6 +3,7 @@
 # No installation into global Termux services, no tunnel and no implicit boot.
 set -euo pipefail
 umask 077
+export LC_ALL=C
 die() { printf '%s\n' "$*" >&2; exit 1; }
 case "$HOME" in /data/data/com.termux/files/home|/data/user/0/com.termux/files/home) ;; *) die 'Use Termux private home.';; esac
 root="$HOME/.chezhi-license-staging"
@@ -14,18 +15,18 @@ for cmd in runsv sv svlogd flock timeout sha256sum openssl curl bash; do
     command -v "$cmd" >/dev/null || die "Missing dependency: $cmd"
 done
 here="$(cd -- "$(dirname -- "$0")" && pwd -P)"
-[ "$#" -eq 1 ] || die 'Usage: install | start | stop | status | backup-now | boot-enable | boot-disable | backup-loop'
+[ "$#" -eq 1 ] || die 'Usage: install | start | stop | status | backup-now | boot-enable | boot-disable | backup-loop | health-loop'
 case "$1" in
     install)
         # Install into a new private directory, never overwrite a live controller.
         [ -f "$here/staging.sh" ] && [ -f "$here/managed-backup.sh" ] || die 'Incomplete reviewed candidate.'
         [ ! -e "$ctl" ] && [ ! -L "$ctl" ] || die 'Controller already exists; use existing controller.'
         mkdir -m 700 "$ctl"
-        mkdir -m 700 "$ctl/code" "$ctl/service" "$ctl/backup" "$ctl/log-service" "$ctl/log-backup"
+        mkdir -m 700 "$ctl/code" "$ctl/service" "$ctl/backup" "$ctl/health" "$ctl/log-service" "$ctl/log-backup" "$ctl/log-health"
         cp -- "$here/staging.sh" "$here/supervisor.sh" "$here/managed-backup.sh" "$ctl/code/"
         chmod 700 "$ctl/code/"*.sh
         (cd "$ctl/code" && sha256sum staging.sh supervisor.sh managed-backup.sh > SHA256SUMS)
-        for name in service backup; do
+        for name in service backup health; do
             mkdir -m 700 "$ctl/$name/log"
             printf 's1048576\nn5\n' > "$ctl/log-$name/config"
             printf '#!%s\nexec svlogd -tt "%s"\n' "$(command -v bash)" "$ctl/log-$name" > "$ctl/$name/log/run"
@@ -33,9 +34,10 @@ case "$1" in
         done
         printf '#!%s\nexec 2>&1\nexec bash "%s" run\n' "$(command -v bash)" "$ctl/code/staging.sh" > "$ctl/service/run"
         printf '#!%s\nexec 2>&1\nexec bash "%s" backup-loop\n' "$(command -v bash)" "$ctl/code/supervisor.sh" > "$ctl/backup/run"
+        printf '#!%s\nexec 2>&1\nexec bash "%s" health-loop\n' "$(command -v bash)" "$ctl/code/supervisor.sh" > "$ctl/health/run"
         # Fixed bounded restart delay. No unbounded tight failure loop.
         printf '#!%s\nsleep 10\n' "$(command -v bash)" > "$ctl/service/finish"
-        chmod 700 "$ctl/service/run" "$ctl/service/finish" "$ctl/backup/run"
+        chmod 700 "$ctl/service/run" "$ctl/service/finish" "$ctl/backup/run" "$ctl/health/run"
         printf 'managed-v1\n' > "$ctl/installed"
         printf 'Installed private controller. Stop the old foreground service before start.\n'
         exit 0
@@ -54,12 +56,15 @@ case "$1" in
         # owns the actual exclusive service lock for each child lifetime.
         (flock -n 9 || die 'Stop the existing foreground service first.') 9>"$root/service.lock"
         rm -f -- "$ctl/stop-requested"
-        main_pid='' backup_pid=''
+        main_pid='' backup_pid='' health_pid=''
         cleanup() {
             trap '' INT TERM HUP
+            printf 'requested\n' > "$ctl/stop-requested"
+            if [ -n "$health_pid" ]; then sv -w 35 exit "$ctl/health" >/dev/null 2>&1 || true; fi
             # Only control runsv instances launched from this private tree.
             if [ -n "$backup_pid" ]; then sv -w 35 exit "$ctl/backup" >/dev/null 2>&1 || true; fi
             if [ -n "$main_pid" ]; then sv -w 45 exit "$ctl/service" >/dev/null 2>&1 || true; fi
+            if [ -n "$health_pid" ]; then wait "$health_pid" || true; fi
             if [ -n "$backup_pid" ]; then wait "$backup_pid" || true; fi
             if [ -n "$main_pid" ]; then wait "$main_pid" || true; fi
         }
@@ -67,24 +72,29 @@ case "$1" in
         trap 'exit 0' INT TERM HUP
         runsv "$ctl/service" 8>&- & main_pid=$!
         runsv "$ctl/backup" 8>&- & backup_pid=$!
-        # Exit if either supervisor itself dies; its service child may still
+        runsv "$ctl/health" 8>&- & health_pid=$!
+        # Exit if any supervisor itself dies; its service child may still
         # own the staging lock. Never kill an unrelated PID or restart over it.
-        wait -n "$main_pid" "$backup_pid" || true
+        wait -n "$main_pid" "$backup_pid" "$health_pid" || true
         if [ -f "$ctl/stop-requested" ]; then exit 0; fi
         die 'A runsv supervisor exited; inspect controller status before restarting.'
         ;;
     stop)
-        # Do not stop a manually launched staging instance.
-        sv -w 35 down "$ctl/backup"
-        sv -w 45 down "$ctl/service"
-        printf 'requested\n' > "$ctl/stop-requested"
-        sv -w 35 exit "$ctl/backup"
+        # Serialize shutdown with health-triggered restart requests.
+        (
+            flock -w 10 7 || die 'Health/control operation busy.'
+            printf 'requested\n' > "$ctl/stop-requested"
+            sv -w 35 down "$ctl/health"
+            sv -w 35 down "$ctl/backup"
+            sv -w 45 down "$ctl/service"
+            sv -w 35 exit "$ctl/backup"
+        ) 7>"$ctl/control.lock"
         # The controller owns the remaining supervisor and shutdown sequence.
         (flock -w 60 8 || die 'Controller shutdown incomplete; inspect status.') 8>"$ctl/controller.lock"
         printf 'Managed services stopped; PostgreSQL remains up. Use staging.sh stop-db if desired.\n'
         ;;
     status)
-        sv status "$ctl/service" "$ctl/backup" || true
+        sv status "$ctl/service" "$ctl/backup" "$ctl/health" || true
         bash "$staging" status
         if openssl x509 -in "$root/tls-cert" -noout -checkend 604800 >/dev/null; then
             printf 'TLS certificate: more than seven days remaining\n'
@@ -112,6 +122,45 @@ case "$1" in
             sleep 900 & child=$!
             wait "$child" || true
             child=''
+        done
+        ;;
+    health-loop)
+        # Do not use pid files, kill arbitrary PIDs, or bypass TLS. A TERM
+        # request goes only to the runit-owned child. Never force-kill it.
+        trap 'exit 0' TERM INT HUP
+        failures=0
+        cooldown=0
+        while true; do
+            [ ! -f "$ctl/stop-requested" ] || exit 0
+            if [ "$cooldown" -gt 0 ]; then cooldown=$((cooldown - 1)); fi
+            if curl --noproxy '*' --fail --silent --show-error --max-time 5 \
+                --cacert "$root/tls-cert" https://127.0.0.1:18443/readyz >/dev/null 2>&1; then
+                failures=0
+            else
+                failures=$((failures + 1))
+                if [ "$failures" -ge 4 ] && [ "$cooldown" -eq 0 ]; then
+                    failures=0
+                    cooldown=8
+                    (
+                        flock -n 7 || exit 0
+                        [ ! -f "$ctl/stop-requested" ] || exit 0
+                        # Do not loop on certificate expiry or trust errors.
+                        if ! openssl verify -CAfile "$root/tls-cert" -verify_ip 127.0.0.1 "$root/tls-cert" >/dev/null 2>&1; then
+                            printf 'HEALTH_HOLD invalid local TLS certificate; operator action required\n' >&2
+                            exit 0
+                        fi
+                        state="$(sv status "$ctl/service" 2>/dev/null)" || exit 0
+                        case "$state" in
+                            'run: '*)
+                                printf 'HEALTH_RECOVERY_REQUEST readiness failed four times; requesting TERM from runit\n' >&2
+                                sv term "$ctl/service" || printf 'HEALTH_HOLD TERM request failed\n' >&2
+                                ;;
+                            *) printf 'HEALTH_HOLD service not running; leave existing runit recovery in control\n' >&2;;
+                        esac
+                    ) 7>"$ctl/control.lock"
+                fi
+            fi
+            sleep 15
         done
         ;;
     boot-enable)
