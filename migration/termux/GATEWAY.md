@@ -583,3 +583,29 @@ to the existing restart/log rotation and integrity tests. The synthetic
 service is a sleep process; actual Android binary FD inheritance and
 Termux runit behavior require separate device validation. The new
 branch is not a deployment or a replacement for the frozen artifact.
+
+### Read-only PostgreSQL log retention advisory
+
+postgres-log-retention.py is included in the V2 maintenance package
+(13 entries, twelve payloads plus manifest). It requires Python 3
+on the device and exact private Termux ARM64 staging home. It reports
+legacy and native collector logical byte counts, free bytes, advisory
+128 MiB log budget and 1 GiB free-space warning, and counts/bytes of
+files beyond the newest seven with at least seven days of mtime age.
+The exact current stderr pointer is excluded even if old. A pointer
+change, absent pointer with existing collector directory, unexpected
+filename/type/mode/owner, hard link, future mtime or more than 10000
+entries produces HOLD. The legacy pg_ctl log is never eligible.
+No log contents or arbitrary filenames are printed. No files are
+deleted, truncated, moved or modified; no SQL, service restart or
+scheduled cleanup. The snapshot is advisory and can race concurrent
+writes/rotation; retry HOLD, never treat it as authorization to delete.
+A hard disk ceiling and safe archival/deletion remain outstanding,
+requiring reviewed maintenance and collector/controller coordination.
+The thresholds are provisional defaults, not measured phone capacity.
+CI tests the inventory on synthetic private fixtures and retains the
+separate real PG18 native rotation test. Frozen PR #10 package remains
+12 entries and must use its original verifier.
+The stacked PR workflow now covers its actual base branch and the
+dedicated maintenance push branch, which previously matched neither
+trigger. No production activation or phone change.
