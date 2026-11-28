@@ -170,3 +170,43 @@ without HTTP requests; warnings are local logs only. The current
 configuration still needs an operator-reviewed bounded log collector
 and notification delivery; no public diagnostics endpoint, no automatic
 restart/rotation, and no phone boot integration are introduced.
+
+### Independent local gateway lifecycle (new candidate)
+
+CI 46120200624 (head f7c35be, checkout 1af0426) passed metrics
+redaction/counting and paced renewals (24/24, 48/48 requests, 77.50s,
+sample P95 16.34ms, no retries/errors). Dashboard comparison remains
+failed: baseline mixed issuance failed, candidate completed with
+18/320 mixed-read 503s, 11 issuance 503s before success, 500ms MISS.
+
+The new artifact includes gateway-service.sh. This is an explicitly
+opt-in foreground runit controller for the reserved local test hostname
+only. It creates ~/.chezhi-gateway-local-v1, separate from M4. Install
+requires a verified artifact and an absent controller directory. It
+never installs into global Termux services or Termux:Boot. Verify the
+artifact ZIP SHA256 and every manifest entry independently before
+running the script; the local code hashes only detect subsequent
+unexpected changes, not a compromised same-UID operator.
+
+Commands: install, start (foreground), status, stop. The run subcommand
+is internal. After install, independently provision a separate private
+test TLS cert and key with IP SAN 127.0.0.1, mode 0600, in credentials
+as tls-cert and tls-key; no automatic credential creation. The original
+M4 tls-cert is read only. Start requires valid private directories,
+code integrity and a valid local self-signed test certificate. It
+sanitizes the child environment, fixes the Host to license.example.invalid
+and lets runit restart a terminated gateway with a ten-second finish
+delay. Stop uses only this service's runit control, not process-name
+search or arbitrary signals. Use stop from another terminal rather
+than killing the foreground controller. If status/control is ambiguous,
+stop the trial and inspect rather than adopting an unknown process.
+svlogd limits rotation to five archived logs plus the current log
+(approximately 1 MiB per file; not a hard filesystem quota).
+The CI fixture uses real runit/svlogd with a synthetic child and scaled
+rotation thresholds, not the physical Android runtime. The separate
+real V2 acceptance still uses the compiled gateway. Do not install or
+start the candidate on the phone if it would interrupt M4 endurance.
+
+No gateway watchdog, boot integration, external tunnel supervisor,
+PostgreSQL log rotation, external notification or public routing is
+implemented by this controller. Those require separate review.
