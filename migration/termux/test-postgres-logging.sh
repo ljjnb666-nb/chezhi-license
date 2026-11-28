@@ -6,7 +6,7 @@ here="$(cd -- "$(dirname -- "$0")" && pwd -P)"
 id="$(docker run -d --network none -e POSTGRES_PASSWORD=ci_ephemeral_only postgres:18.7-alpine)"
 trap 'docker rm -f "$id" >/dev/null' EXIT
 for i in $(seq 1 30); do
-    if docker exec "$id" pg_isready -U postgres -d postgres >/dev/null 2>&1; then break; fi
+    if docker exec "$id" sh -ec 'test "$(cat /proc/1/comm)" = postgres && pg_isready -U postgres -d postgres' >/dev/null 2>&1; then break; fi
     sleep 1
 done
 # Avoid racing the image's temporary initialization server.
