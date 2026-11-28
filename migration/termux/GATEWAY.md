@@ -852,3 +852,35 @@ a temporary file; do not auto-delete unrelated files. POSIX tests
 cover modes, replacement, symlink refusal, alert flags and cancellation.
 Android filesystem and notification consumer/delivery still require
 validation. No existing installed controller is upgraded automatically.
+
+### Local observer candidate (M7)
+
+The rerun of CI 46136366621 on bd5a704 completed 13/13. The original
+audited baseline mixed issuance assertion failed; both candidate
+capacity profiles passed on both attempts. Rerun candidate 100k
+overview median trial P95: 378.0 / 370.7 ms. This does not establish
+sustained capacity or remove the original failure evidence.
+
+Source-only observer, not included in the signed/unsigned maintenance
+package yet; no installation or service integration. On a disposable
+private status directory, using Python 3.11+ on POSIX:
+
+    python3 migration/termux/gateway-status-observer.py --self-test
+    python3 migration/termux/gateway-status-observer.py --directory /absolute/private/status
+    python3 migration/termux/gateway-status-observer.py --directory /absolute/private/status --watch
+
+One-shot exit 0 means a fresh valid OBSERVING snapshot, not readiness
+or proof of license validity; exit 2 means missing, invalid, stale
+or STOPPING. Watch mode emits fixed local transition labels every
+30-second sample, not HTTP endpoints or external notifications.
+Deduplication and the timestamp high-water mark are in memory only.
+Unknown intervals and generation changes cannot produce a synthetic
+recovery notification. A closed alert flag is not proof of service
+recovery. A fresh snapshot cannot prove the publisher still lives;
+abrupt death may only be visible when the snapshot exceeds 180 s.
+Clock rollback may conservatively invalidate observations. Same-UID
+tampering and untrusted directory ancestors are outside the contract.
+No persistent delivery, restart deduplication or exact event replay.
+The consumer reads no credentials, sends no network requests and
+does not write to the producer directory. CI and Termux verification
+remain required before packaging or operational use.
