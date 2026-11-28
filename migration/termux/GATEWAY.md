@@ -635,3 +635,38 @@ failure cannot hide that test. No PID scanning, automatic orphan
 termination or active log deletion. The actual Android descriptor
 inheritance and abrupt supervisor-death recovery remain unverified.
 No performance or phone changes; PR #10 remains frozen.
+
+### Lifecycle evidence and encrypted V2 recovery fixture
+
+CI 46131975333 (head eeb5137, checkout 51d6805) passed 12/13.
+Gateway job 140938968366 explicitly recorded concurrent stop
+first=0 second=0, real Linux runit lifecycle PASS, retention unit
+fixture OK and 13-entry ZIP verification. PG18 job 140938968246
+passed native rotation and the existing synthetic age restore.
+Both strict dashboard profiles failed the unchanged 500ms gate
+(100k overview 545.6/567.5ms); all four mixed phases passed.
+No dashboard runtime source changed relative to frozen PR #10.
+This does not establish the cause of latency variation and remains
+a release blocker; do not relax the strict gate or claim full CI.
+
+The standalone V2 suite now optionally encrypts the actual disposable
+V2 PostgreSQL logical dump and temporary signing key separately
+with age, copies ciphertext to a separate private receiver directory,
+checks independently retained ciphertext digests, rejects wrong
+identity and damaged ciphertext, and verifies the decrypted bytes.
+CI explicitly enables this path and requires V2_ENCRYPTED_RECOVERY.
+The restored database is populated only from received dump bytes
+and the server uses the recovered signing key path, not the original.
+The existing recovery security reset, changed deployment scope,
+old challenge rejection, preserved bindings, independent Ed25519
+renewal verification, revocation and legacy denial remain mandatory.
+An unrelated generated signing key must fail server startup.
+All material is synthetic and within the existing temporary fixture;
+no signing key, identity, plaintext dump or ciphertext is uploaded.
+No production backup tool, live key export, real remote transfer,
+separate physical host or fresh database cluster is implemented.
+The receiver is a directory on the same runner and the restored
+database is in the same disposable PG17 container; existing PG18
+encrypted fixture remains independent. Fresh roles/config/TLS
+reconstruction and real off-device disaster recovery are outstanding.
+No physical phone or public endpoint changes.
