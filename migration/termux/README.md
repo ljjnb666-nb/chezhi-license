@@ -104,3 +104,45 @@ Acceptance order:
 No production capacity, public reachability, code signing, APK, automatic
 boot or restore is delivered by this candidate. The existing desktop
 authorization and privileged-operation gates remain unchanged.
+
+## Owner-reported physical-device acceptance — 2026-11-28
+
+CONDITIONAL_PASS for the original local staging candidate only. The
+operator supplied an on-device acceptance report; the repository review
+independently checked CI and artifact metadata, not the phone itself.
+PR #8 head 763f4c52f6a165db7bf55c206faecafcc5758549, merge checkout
+adf44f4, [CI 46043511742](https://github.com/ljjnb666-nb/chezhi-license/actions/runs/46043511742)
+12/12 successful. Artifact 15220523183 SHA256
+d3290f4d45196390aafc9685f168c103aa7c7146882c63683f1c1e6e8dc3d9e4.
+
+- Honor AQM-AL10, HarmonyOS 3.0.0.165, aarch64, API 29, PostgreSQL 18.7.
+- Reported verified transfer, seven internal file hashes, both DB role
+  checks, denied excess grants, 0600 secret files and trusted HTTPS.
+- 8/8 synthetic card/business checks: bad password, login, issuance,
+  activation/independent signature verification, validate, renew,
+  legacy downgrade refusal, revoked-card denial. One synthetic revoked
+  card retained after controlled process and database restart.
+- Reported native dump and restore into a separate database with
+  matching row counts; not recovered-service functional acceptance.
+- Single post-restart RSS samples: service 12.4 MiB, PostgreSQL
+  parent 28.1 MiB; database directory 65 MiB. Not peak or aggregate RSS.
+- All listeners remained loopback; temporary SSH authorization and USB
+  forwarding removed and denial verified.
+
+Two reported deployment defects: initial password prompt misstated the
+minimum character count and rejected input after DB setup; a -h probe
+created a local demo instance and emitted temporary demo credentials.
+The operator stopped that instance and kept the failed initialization
+separate. Never copy its credentials to logs or reuse them. Confirm the
+demo directory remains quarantined; do not remove evidence automatically.
+Follow-up changes validate password length before initialization and
+make option probes non-mutating; their CI and on-device recheck are
+separate from the original artifact's acceptance.
+
+Remain HOLD for natural card expiry, complete phone reboot, screen-off
+and 24/72-hour stability, service-level recovery, off-device recovery,
+resource/thermal limits, certificate renewal and external access.
+Do not reinstall the running fixture just to update documentation.
+No public listener or tunnel is authorized by this acceptance. A later
+external-access candidate must prove strict separation of public V2
+API routes from administrator, database and diagnostic interfaces.
