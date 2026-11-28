@@ -54,7 +54,23 @@ def capture_plans(sql, folder, label, baseline):
                     count(*) FILTER (WHERE c.revoked) AS revoked FROM chezhi_cards c WHERE c.ref=p.ref
             ) q ORDER BY p.position DESC"""
         queries = {
-            "overview-status": f"SELECT status,count(*) FROM (SELECT {status} AS status FROM chezhi_cards c) s GROUP BY status",
+            "overview-status": f"""SELECT count(*),
+                count(*) FILTER (WHERE c.revoked),
+                count(*) FILTER (WHERE NOT c.revoked AND c.expires<={now}::numeric),
+                count(*) FILTER (WHERE NOT c.revoked AND (c.expires<={now}::numeric) IS NOT TRUE AND c.activated IS NULL),
+                count(*) FILTER (WHERE NOT c.revoked AND (c.expires<={now}::numeric) IS NOT TRUE AND c.activated IS NOT NULL AND c.device=''),
+                count(*) FILTER (WHERE NOT c.revoked AND (c.expires<={now}::numeric) IS NOT TRUE AND c.activated IS NOT NULL AND c.device<>'')
+                FROM chezhi_cards c""",
+            "orders-unfiltered-page": """WITH page AS (
+                SELECT ref,max(position) AS position FROM chezhi_cards
+                GROUP BY ref ORDER BY max(position) DESC LIMIT 20 OFFSET 80
+                )
+                SELECT o.ref,o.channel,o.created,o.days,q.cards,q.activated,q.revoked,q.cards::numeric*o.cents
+                FROM page p JOIN chezhi_orders o USING(ref) CROSS JOIN LATERAL (
+                SELECT count(*) AS cards,count(*) FILTER (WHERE c.activated IS NOT NULL) AS activated,
+                count(*) FILTER (WHERE c.revoked) AS revoked FROM chezhi_cards c WHERE c.ref=p.ref
+                ) q ORDER BY p.position DESC""",
+            "orders-unfiltered-prior": page.replace(order_filter, "").format(offset=80),
             "overview-sales": f"""WITH quantities AS (SELECT ref,count(*) AS cards FROM chezhi_cards GROUP BY ref),
                 sales AS (SELECT CASE WHEN o.created>={start}::numeric AND o.created<{end}::numeric
                     THEN floor((o.created-{start}::numeric)/86400)::int END AS day,
