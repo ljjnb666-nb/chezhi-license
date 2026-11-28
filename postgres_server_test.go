@@ -45,14 +45,20 @@ func TestPostgresServerProjectionParity(t *testing.T) {
 	if result, err := s.validate(keys[0], "active-device"); err != nil || !result.Valid {
 		t.Fatal(err)
 	}
-	if _, err := s.issue(0, 3, 600, "test", "Exclude-Trend"); err != nil {
+	permanent, err := s.issue(0, 3, 600, "test", "Exclude-Trend")
+	if err != nil {
 		t.Fatal(err)
 	}
+	if result, err := s.validate(permanent[0], "permanent-device"); err != nil || !result.Valid {
+		t.Fatal("permanent activation fixture", err)
+	}
 	state := pgSnapshot(t, s)
+	// A legal order row without cards must not enter counts or pagination.
+	pgExec(t, s, "INSERT INTO chezhi_orders(ref,channel,cents,days,created) VALUES ('empty-order','wechat',10,30,$1)", sqlTime(now))
 	for _, test := range []struct{ section, raw string }{
 		{"overview", ""}, {"cards", "q=cASE&channel=wechat&page=2"},
 		{"cards", "status=已过期"}, {"cards", "status=已解绑"}, {"cards", "status=已吊销"},
-		{"orders", "oc=wechat&oq=cASE"}, {"orders", "op=99"},
+		{"orders", "oc=wechat&oq=cASE"}, {"orders", "op=99"}, {"orders", ""}, {"orders", "oc=wechat"},
 		{"devices", "ds=已吊销"}, {"devices", "ds=已激活"}, {"devices", "ds=已过期"},
 		{"audit", "ap=2"}, {"settings", ""}, {"issue", ""}, {"plans", ""},
 	} {
