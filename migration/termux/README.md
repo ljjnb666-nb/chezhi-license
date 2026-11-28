@@ -146,3 +146,85 @@ Do not reinstall the running fixture just to update documentation.
 No public listener or tunnel is authorized by this acceptance. A later
 external-access candidate must prove strict separation of public V2
 API routes from administrator, database and diagnostic interfaces.
+
+## M4 managed staging candidate (runit)
+
+This optional controller adopts the existing initialized database and
+existing reviewed binary. It does not replace the binary, rotate keys,
+initialize data, expose ports, install global Termux services or start
+cloudflared. Validate the new artifact SHA256 and its manifest before use.
+The original phone acceptance is not an acceptance of these new scripts.
+
+Prerequisites: Termux private home, runit (runsv, sv, svlogd), coreutils,
+util-linux, PostgreSQL, OpenSSL and curl. Termux:Boot must be installed
+from the same signing source as Termux and opened once for boot opt-in.
+Termux:API is optional and not used by this controller.
+
+From the verified extracted artifact:
+
+    bash migration/termux/supervisor.sh install
+
+Installation creates a new private managed-v1 directory and copies three
+reviewed scripts into it. It refuses to overwrite an existing controller.
+It does not start or stop the existing instance. Stop the old foreground
+application gracefully first; retain the database and original backups.
+Then, in a Termux session:
+
+    bash migration/termux/supervisor.sh start
+
+Use a second session for status and controlled shutdown:
+
+    bash migration/termux/supervisor.sh status
+    bash migration/termux/supervisor.sh backup-now
+    bash migration/termux/supervisor.sh stop
+    bash migration/termux/staging.sh stop-db
+
+The foreground controller starts two private runsv processes. Each
+application launch retains the existing staging service lock, checks the
+installed binary digest and DB runtime grants, and starts the existing
+PostgreSQL cluster if needed. runit restarts a failed application after
+a fixed ten-second finish delay; no tight restart loop. The controller
+refuses concurrent starts and refuses to take over a live foreground
+service. A runsv failure exits the controller with an error rather than
+launching an overlapping child. Controlled stop stops managed children,
+leaving PostgreSQL running for explicit shutdown. If stop times out,
+inspect the actual process and lock state; never kill arbitrary PIDs.
+
+Service and backup logs use svlogd, approximately 1 MiB per segment and
+five retained rotated segments for each service. PostgreSQL's original
+postgres.log is not rotated by this candidate; monitor disk usage and
+plan a separately reviewed DB logging change. Status checks readiness
+with the existing TLS certificate and warns when it expires within
+seven days. Health failures without process exit and postmaster loss
+while the app remains alive are not automatically repaired in this
+candidate. No Android process-survival guarantee or forced wake lock.
+
+The backup service checks every 15 minutes, producing at most one
+completed logical archive per UTC date in managed-daily. The archive
+is checked for listability, complete decode, and SHA256 before publish.
+The scheduler retains the newest seven verified daily copies, excluding
+all preexisting manual backups and incomplete directories. Unexpected
+files, invalid archives and backward dates block pruning. Less than
+1 GiB free blocks new backups. Failures remain in local logs; no external
+notification is installed. Restore validation and encrypted off-device
+copies remain separate. A backup now command is idempotent for today's
+completed archive, not a replacement for the manual backup command.
+
+Enable boot only after controlled adoption and explicit operator approval:
+
+    bash migration/termux/supervisor.sh boot-enable
+
+Disable the exact owned boot entry:
+
+    bash migration/termux/supervisor.sh boot-disable
+
+Boot-enable does not start a service or acquire a wake lock. Boot-disable
+does not stop the running controller. Android may delay or suppress
+boot/background activity; prove actual execution after complete reboot
+and unlock on the physical device. The Linux CI fixture exercises real
+runit with a synthetic service and synthetic archive utilities; it is
+not an Android or PostgreSQL restore test. Field gates: verify installed
+script digests, manual-service exclusion, service termination/restart,
+controlled stop without relaunch, backup scheduling and retention,
+screen-off/reboot/24h/72h uptime, storage/thermal behavior, and rollback
+to the original foreground staging script. External access remains HOLD.
