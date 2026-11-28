@@ -61,6 +61,28 @@ def capture_plans(sql, folder, label, baseline):
                 count(*) FILTER (WHERE NOT c.revoked AND (c.expires<={now}::numeric) IS NOT TRUE AND c.activated IS NOT NULL AND c.device=''),
                 count(*) FILTER (WHERE NOT c.revoked AND (c.expires<={now}::numeric) IS NOT TRUE AND c.activated IS NOT NULL AND c.device<>'')
                 FROM chezhi_cards c""",
+            "overview-combined": f"""WITH quantities AS (
+    SELECT c.ref,count(*) AS cards,
+        count(*) FILTER (WHERE c.revoked) AS revoked,
+        count(*) FILTER (WHERE NOT c.revoked AND c.expires<={now}::numeric) AS expired,
+        count(*) FILTER (WHERE NOT c.revoked AND (c.expires<={now}::numeric) IS NOT TRUE AND c.activated IS NULL) AS unused,
+        count(*) FILTER (WHERE NOT c.revoked AND (c.expires<={now}::numeric) IS NOT TRUE AND c.activated IS NOT NULL AND c.device='') AS unbound,
+        count(*) FILTER (WHERE NOT c.revoked AND (c.expires<={now}::numeric) IS NOT TRUE AND c.activated IS NOT NULL AND c.device<>'') AS active
+    FROM chezhi_cards c GROUP BY c.ref
+), sales AS (
+    SELECT CASE WHEN o.channel<>'test' AND o.created>={start}::numeric AND o.created<{end}::numeric
+        THEN floor((o.created-{start}::numeric)/86400)::int END AS day,
+        q.*,o.channel<>'test' AS paid,q.cards::numeric*o.cents AS cents
+    FROM quantities q JOIN chezhi_orders o USING(ref)
+)
+SELECT grouping(day),day,coalesce(sum(cards) FILTER (WHERE paid),0),
+    count(*) FILTER (WHERE paid),coalesce(sum(cents) FILTER (WHERE paid),0),
+    coalesce(sum(cards),0),coalesce(sum(revoked),0),coalesce(sum(expired),0),
+    coalesce(sum(unused),0),coalesce(sum(unbound),0),coalesce(sum(active),0)
+FROM sales GROUP BY GROUPING SETS ((day),())""",
+            "orders-unfiltered-count": """SELECT count(*) FROM chezhi_orders o
+                WHERE (''='' OR o.channel='') AND (''='' OR strpos(lower(o.ref COLLATE "pg_c_utf8"),'')>0)
+                AND EXISTS (SELECT 1 FROM chezhi_cards c WHERE c.ref=o.ref)""",
             "orders-unfiltered-page": """WITH page AS (
                 SELECT ref,max(position) AS position FROM chezhi_cards
                 GROUP BY ref ORDER BY max(position) DESC LIMIT 20 OFFSET 80
