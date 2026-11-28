@@ -937,3 +937,47 @@ self-tests after package integrity checks. Packaging is not installation
 or deployment; no automatic observer service or external notifications.
 The observer still uses in-memory state only. Persistent delivery,
 monitor liveness and actual Android/Termux verification remain open.
+
+### Durable local observer candidate (M7-F)
+
+CI 46138985719 on 51abcd7 passed 13/13, including the exact
+14-entry maintenance ZIP verifier and five staged observer tests.
+Strict candidate 100k overview P95: 321.6 / 322.0 ms, zero slow
+overview samples; prior intermittent capacity misses remain evidence.
+
+Opt-in durable mode (disposable fixture, POSIX Python 3.11+):
+provision a separate operator-owned absolute directory, mode 0700.
+Do not reuse the producer status directory or edit the running device.
+
+    python3 gateway-status-observer.py --directory /absolute/private/status --state-directory /absolute/private/observer --watch
+    python3 gateway-status-observer.py --state-directory /absolute/private/observer --check-state
+
+The directory inode has a nonblocking exclusive flock for the writer.
+The fixed observer.json checkpoint (0600) contains only validated
+snapshot state, timestamp, availability flag and at most four
+allowlisted pending event labels with random stable IDs. State and
+outbox are published together by file fsync, rename, directory fsync.
+A pending batch is flushed to local stdout before being acknowledged;
+on restart the same IDs are replayed. A partial delivery or crash
+between flush and acknowledgement can duplicate events. A successful
+stdout flush is not an external receiver acknowledgement, and events
+between observations cannot be recovered. No exactly-once guarantee,
+network delivery or automatic notification service. A failed write or
+output exits nonzero and pending state must not be overwritten.
+Corrupt/incompatible files and clock rollback fail closed; no automatic
+reset or deletion. Abrupt death can leave a private temporary file;
+operator review is required before cleanup. The existing stateless
+mode remains available, with its earlier semantics.
+
+On restart unchanged open flags are deduplicated; a closed flag
+across an unobserved interval does not prove recovery and is not
+reported as such. After an actual unavailable interval open flags can
+be announced again conservatively. Heartbeat check is read-only:
+a valid checkpoint with no pending batch and age 0–90 seconds
+returns 0; missing, invalid, stale, future or pending returns 2.
+A fresh heartbeat is not proof of a live PID, gateway readiness or
+license validity; a stopped or blocked observer becomes detectable
+by an independent periodic checker after expiry. No checker is
+installed automatically. Same-UID tampering and untrusted ancestors
+remain outside the boundary. Real Termux flock/fsync behavior and
+independent liveness scheduling remain unverified. No phone action.
