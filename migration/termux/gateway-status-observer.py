@@ -12,7 +12,7 @@ import tempfile
 from pathlib import Path
 
 MAX_BYTES = 4096
-MAX_AGE = dt.timedelta(seconds=180)
+MAX_AGE_NS = 180 * 1_000_000_000
 COUNTERS = {"total", "http_200", "denied", "limited", "unavailable", "other", "active"}
 FLAGS = {"alert_5xx_open", "alert_429_open"}
 FIELDS = COUNTERS | FLAGS | {"version", "started_utc", "observed_utc", "lifecycle"}
@@ -33,7 +33,15 @@ def stamp(value):
         r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,9})?Z", value
     ):
         raise ValueError("invalid UTC timestamp")
-    return dt.datetime.fromisoformat(value[:-1] + "+00:00")
+    # Go emits RFC3339Nano; datetime alone truncates the last three digits.
+    whole, _, fraction = value[:-1].partition(".")
+    second = dt.datetime.fromisoformat(whole + "+00:00")
+    return datetime_ns(second) + int(fraction.ljust(9, "0") or "0")
+
+
+def datetime_ns(value):
+    delta = value - dt.datetime(1970, 1, 1, tzinfo=UTC)
+    return ((delta.days * 86400 + delta.seconds) * 1_000_000 + delta.microseconds) * 1000
 
 
 def parse(raw, now):
@@ -54,13 +62,14 @@ def parse(raw, now):
         if type(s[key]) is not bool:
             raise ValueError("invalid alert flag")
     started, observed = stamp(s["started_utc"]), stamp(s["observed_utc"])
-    if not started <= observed <= now or now - observed > MAX_AGE:
+    now_ns = datetime_ns(now)
+    if not started <= observed <= now_ns or now_ns - observed > MAX_AGE_NS:
         raise ValueError("stale or inconsistent timestamp")
     # Counters are separate atomic samples, not a transactional sum.
     return s
 
 
-def read_snapshot(directory, now):
+def read_snapshot(directory, now=None):
     # POSIX only. Ancestors must be controlled by the operator; same-UID
     # tampering is outside the producer/consumer trust boundary.
     if not os.path.isabs(directory):
@@ -77,7 +86,8 @@ def read_snapshot(directory, now):
                     or stat.S_IMODE(info.st_mode) != 0o600 or info.st_size > MAX_BYTES):
                 raise ValueError("invalid status file")
             with os.fdopen(fd, "rb", closefd=False) as source:
-                return parse(source.read(MAX_BYTES + 1), now)
+                raw = source.read(MAX_BYTES + 1)
+                return parse(raw, dt.datetime.now(UTC) if now is None else now)
         finally:
             os.close(fd)
     finally:
@@ -98,7 +108,7 @@ class Observer:
         previous = self.last
         events = []
         gap = self.unavailable
-        same = previous is not None and previous["started_utc"] == current["started_utc"]
+        same = previous is not None and stamp(previous["started_utc"]) == stamp(current["started_utc"])
         if previous is not None and (stamp(current["observed_utc"]) < stamp(previous["observed_utc"])
                 or stamp(current["started_utc"]) < stamp(previous["started_utc"])
                 or (stamp(current["observed_utc"]) == stamp(previous["observed_utc"]) and current != previous)
@@ -125,7 +135,7 @@ class Observer:
 
 def sample(directory):
     try:
-        return read_snapshot(directory, dt.datetime.now(UTC))
+        return read_snapshot(directory)
     except (OSError, ValueError, TypeError, RecursionError, AttributeError):
         return None
 
@@ -177,6 +187,27 @@ class Tests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 read_snapshot(root, self.now)
 
+    def test_nanosecond_boundaries(self):
+        self.assertEqual(stamp("2026-11-28T12:00:00.000000002Z") -
+                         stamp("2026-11-28T12:00:00.000000001Z"), 1)
+        raw = json.dumps({**self.s, "observed_utc": "2026-11-28T12:00:00.000000001Z"}).encode()
+        with self.assertRaises(ValueError):
+            parse(raw, self.now)
+        parse(raw, self.now + dt.timedelta(microseconds=1))
+        raw = json.dumps({**self.s, "started_utc": "2026-11-28T11:56:59Z",
+                          "observed_utc": "2026-11-28T11:57:00Z"}).encode()
+        parse(raw, self.now)
+        with self.assertRaises(ValueError):
+            parse(raw, self.now + dt.timedelta(microseconds=1))
+        o = Observer()
+        first = {**self.s, "observed_utc": "2026-11-28T12:00:00.000000001Z"}
+        second = {**first, "observed_utc": "2026-11-28T12:00:00.000000002Z",
+                  "alert_429_open": True}
+        o.update(first)
+        self.assertEqual(o.update(second), ["HTTP_429_OPEN"])
+        self.assertEqual(o.update(first), ["STATUS_UNAVAILABLE"])
+        self.assertEqual(o.update(first), [])
+
     def test_events(self):
         o = Observer()
         self.assertEqual(o.update(None), ["STATUS_UNAVAILABLE"])
@@ -188,12 +219,29 @@ class Tests(unittest.TestCase):
         self.assertEqual(o.update(closed), ["HTTP_5XX_FLAG_CLOSED_NOT_PROOF_OF_RECOVERY"])
         self.assertEqual(o.update(None), ["STATUS_UNAVAILABLE"])
         self.assertNotIn("HTTP_5XX_FLAG_CLOSED_NOT_PROOF_OF_RECOVERY", o.update(closed))
-        changed = {**closed, "started_utc": "2026-11-28T12:00:30Z"}
-        self.assertEqual(o.update(changed), ["GENERATION_CHANGED_NOT_READY"])
+        conflicting = {**closed, "started_utc": "2026-11-28T12:00:30Z"}
+        self.assertEqual(o.update(conflicting), ["STATUS_UNAVAILABLE"])
+        self.assertEqual(o.update(conflicting), [])
+        changed = {**conflicting, "observed_utc": "2026-11-28T12:01:01Z"}
+        self.assertEqual(o.update(changed), ["STATUS_AVAILABLE_NOT_READY", "GENERATION_CHANGED_NOT_READY"])
         self.assertEqual(o.update({**changed, "lifecycle": "STOPPING",
                                    "observed_utc": "2026-11-28T12:02:00Z"}), ["STOPPING_NOT_READY"])
         self.assertEqual(o.update(changed), ["STATUS_UNAVAILABLE"])
         self.assertEqual(o.update(changed), [])  # older generation/sample stays rejected
+        later_old = {**changed, "started_utc": self.s["started_utc"],
+                     "observed_utc": "2026-11-28T12:03:00Z"}
+        self.assertEqual(o.update(later_old), [])
+        invalid_resume = {**changed, "observed_utc": "2026-11-28T12:03:00Z"}
+        self.assertEqual(o.update(invalid_resume), [])
+
+    def test_gap_never_claims_recovery(self):
+        o = Observer()
+        opened = {**self.s, "alert_5xx_open": True, "alert_429_open": True}
+        o.update(opened)
+        o.update(None)
+        closed = {**self.s, "observed_utc": "2026-11-28T12:01:00Z"}
+        self.assertEqual(o.update(closed), ["STATUS_AVAILABLE_NOT_READY"])
+        self.assertEqual(o.update(closed), [])
 
 
 def main():
