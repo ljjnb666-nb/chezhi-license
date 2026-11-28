@@ -335,3 +335,49 @@ replacement, restart or recovery key export are performed. A real
 rotation requires an approved maintenance window after endurance,
 coordination of all existing trust consumers, verified recovery and
 a rollback plan. No real secrets should be included in CI artifacts.
+
+### Release integrity and local alert transitions
+
+CI 46124210801 (head 644f917, checkout 767df42) passed 12/13 jobs.
+The independent TLS transition/rollback fixture and strengthened age
+restore test passed. Paced renewal: 24/24, 48 requests in 77.38s,
+sample P95 12.20ms, zero retry/error. Historical baseline mixed
+issuance failed; candidate repeated 500ms target passed, with
+17/320 mixed-read 503s and eight issuance 503s before success.
+Keep the capacity problem open.
+
+Gateway alerts use the existing minute sampling loop. Two consecutive
+samples with at least three new 5xx responses or ten new 429 responses
+open one alert for that category. Two consecutive samples with no
+new events emit QUIET, which means only that the counters were quiet;
+it does not prove service recovery. A lower nonzero count does not
+clear an alert. No repeated notification while open, no request
+contents or caller identifiers, no auto-restart, and no outbound
+notification. State is in memory and resets at process restart.
+These thresholds are provisional, not a production SLO.
+
+The unsigned gateway artifact now includes the maintenance preflight,
+PG logging profile, encrypted export and receive tools and candidate
+TLS staging tool. All eleven payload files are covered by SHA256SUMS.
+The trusted verifier is migration/termux/verify-maintenance-zip.py
+from independently reviewed source, not an executable obtained from
+the package being verified. It requires the actual downloaded ZIP
+SHA256 from trusted GitHub artifact metadata and the actual CI checkout
+SHA (not merely PR head). It reads at most 64 MiB compressed and
+permits at most 64 MiB declared uncompressed content, exact flat
+allowlist and manifest, rejects duplicate entries, special file types,
+encrypted ZIP entries, wrong source and unsigned notice mismatch.
+CI verifies a locally assembled ZIP and negative fixtures, not the
+server-generated download ZIP. Verify the real downloaded artifact
+before extraction. Verification does not grant release approval,
+authenticate a compromised build system, install files, or execute
+anything.
+
+Keep old known-good phone artifact and private controller directories
+for rollback. Before a later approved maintenance activation, verify
+both candidate and rollback digests, confirm backup recovery, stop
+only the relevant controlled service, stage in a fresh directory,
+test locally with explicit trust and restore previous reviewed version
+if checks fail. No automatic activation/rollback, remote notification,
+per-client edge rate control or public connector configuration is
+implemented. No real phone modification during M4 endurance.
