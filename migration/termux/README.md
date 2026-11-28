@@ -206,8 +206,11 @@ a child that ignores TERM, other trust failures or a persistent database
 fault need operator diagnosis. No Android process-survival guarantee or
 forced wake lock.
 
-The backup service checks every 15 minutes, producing at most one
-completed logical archive per UTC date in managed-daily. The archive
+The backup service waits for trusted HTTPS readiness, polling every five
+seconds while unready, then automatically attempts the current UTC day's
+backup. A successful check sleeps 15 minutes; a backup failure retries
+in 60 seconds. At most one completed logical archive per UTC date is
+published in managed-daily. The archive
 is checked for listability, complete decode, and SHA256 before publish.
 The scheduler retains the newest seven verified daily copies, excluding
 all preexisting manual backups and incomplete directories. Unexpected
@@ -226,7 +229,13 @@ Disable the exact owned boot entry:
     bash migration/termux/supervisor.sh boot-disable
 
 Boot-enable does not start a service or acquire a wake lock. Boot-disable
-does not stop the running controller. Android may delay or suppress
+does not stop the running controller. The generated boot entry uses the
+installed Bash path and writes one private boot-attempt timestamp before
+invoking the controller. Run supervisor.sh boot-status to inspect whether
+the exact entry is installed and the last observed entry invocation. A
+manual invocation can also create this marker, so compare its timestamp
+against the actual reboot and corroborate with Android broadcast history.
+This marker alone is not proof of a successful boot. Android may delay or suppress
 boot/background activity; prove actual execution after complete reboot
 and unlock on the physical device. The Linux CI fixture exercises real
 runit with a synthetic service and synthetic archive utilities; it is
@@ -236,3 +245,61 @@ controlled stop without relaunch, readiness failure and certificate hold,
 backup scheduling and retention,
 screen-off/reboot/24h/72h uptime, storage/thermal behavior, and rollback
 to the original foreground staging script. External access remains HOLD.
+
+## M4 physical-device follow-up — 2026-11-28
+
+Operator-reported evidence for head 9836d0390278acbf2ed9e96727985527b89c0ef0,
+CI 46111041790, artifact 15249777130 (nine manifest checks passed):
+HOLD_BOOT, safe rollback to original foreground service at 13:41:56 CST.
+Manual-service exclusion, managed startup, duplicate refusal, graceful
+stop and application restart within 11 seconds passed. PostgreSQL PID
+was unchanged across application restart. Original binary, key, TLS
+certificate, manual backup hashes, cluster identity and business row
+counts were reportedly preserved. Native daily archive verified with
+68 directory entries and full decode, but the scheduler initially ran
+before readiness and required a worker restart to generate the archive.
+Short unplug/screen-off overlap was 3m13s; process identities unchanged,
+observed HTTPS probes successful but with a sampling gap. No 24/72h proof.
+Termux 0.118.3, Boot 0.8.1, API 0.53.0 from F-Droid, common UID; battery
+exemption and boot permission checked. Android recorded Boot receiver
+Skipped after an approved cold reboot; cause not yet established.
+Boot entry disabled, original foreground service restored, tunnel off.
+No phone access was performed by repository reviewer.
+
+### Boot diagnosis and safe retest
+
+Battery optimization exemption does not imply OEM app-launch permission.
+Open Termux:Boot once from its launcher (official instructions:
+https://github.com/termux/termux-boot). On HarmonyOS, inspect the normal
+Settings/Optimizer App launch controls for Termux and, if listed,
+Termux:Boot; operator may allow auto-launch, secondary launch and
+background activity. See Huawei guidance:
+https://consumer.huawei.com/en/support/content/en-us15850069/
+Do not disable system security, force broadcast delivery, spoof the
+system boot event, root the phone or force-stop apps as a workaround.
+Collect read-only package stopped/enabled state, user-unlock state,
+broadcast history and relevant sanitized logcat records. A missing
+marker plus skipped broadcast indicates no observed entry invocation;
+a fresh marker plus no service indicates a later launch failure.
+Do not treat a synthetic/manual boot-entry test as a real reboot.
+
+### Updating the stopped controller without changing data
+
+The previous controller is not an in-place update target. Keep its
+logs and scripts as evidence. Verify the new artifact digest/manifest,
+confirm the old boot entry is absent using the old reviewed controller,
+confirm all old managed children and runsv processes have exited and
+the old controller lock is free. Only with operator approval, rename
+the exact private managed-v1 directory to a new, unused sibling archive
+directory; never overwrite an archive or move the staging root, pgdata,
+keys, installed binary, manual backups or managed-daily. Never execute
+the archived controller after renaming it. Install the new controller
+from the extracted reviewed artifact; then follow the existing graceful
+manual-stop/adoption procedure. If setup fails, keep evidence and restore
+the original foreground service. For subsequent cold reboot, explicitly
+obtain approval, enable boot, confirm readiness, record baseline time,
+reboot, unlock and inspect boot-status before manually invoking anything.
+If the system still skips delivery, disable the entry and retain a
+documented manual-start requirement; do not claim unattended boot.
+Natural scheduling across UTC dates, actual watchdog fault injection,
+and 24/72h endurance remain physical-device gates. Cloudflare stays off.
