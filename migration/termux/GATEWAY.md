@@ -149,3 +149,24 @@ it is not pure transport latency or maximum throughput. Separate real
 TCP listener tests cover slot exhaustion, double close, release and
 shutdown while admission is blocked. The test cannot establish a
 production concurrency limit or sustained phone/Cloudflare capacity.
+
+### Local observability
+
+CI 46119073427 (head ac8a6f2, checkout 97752f6) actually passed the
+paced test: 24/24 signed renewals, 48/48 requests, 77.46 seconds,
+sample P95 15.92 ms, zero retry/error, unique nonces and stable card
+and binding snapshots. The real TCP listener resource test also passed.
+The historical baseline again failed mixed issuance (12/13 overall).
+The next workflow collects both profiles even when one fails, preserves
+both exit statuses and still fails the job if either fails.
+
+The new gateway emits fixed-cardinality cumulative HTTP counters once
+per minute, plus a final report after graceful shutdown. "success"
+means HTTP 200, not independently verified authorization. Counts
+reset on process restart and concurrent reports are not atomic snapshots.
+It does not log request bodies, IPs, paths, credentials or headers.
+TLS trust and expiry are checked at startup and every 15 minutes
+without HTTP requests; warnings are local logs only. The current
+configuration still needs an operator-reviewed bounded log collector
+and notification delivery; no public diagnostics endpoint, no automatic
+restart/rotation, and no phone boot integration are introduced.
