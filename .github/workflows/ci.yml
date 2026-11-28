@@ -477,22 +477,31 @@ jobs:
         with:
           go-version: '1.26.11'
           cache: false
+      - name: Isolated runit lifecycle and daily backup fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v runsv >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends runit
+          fi
+          timeout 180s bash migration/termux/test-supervisor.sh
       - name: Syntax, cross-build and unsigned candidate evidence
         shell: bash
         run: |
           set -euo pipefail
-          bash -n migration/termux/staging.sh
+          for script in migration/termux/*.sh; do bash -n "$script"; done
           mkdir -p bin/termux-staging/migration/termux
           CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build -trimpath -o bin/termux-staging/chezhi-server-android-arm64 .
           readelf -h bin/termux-staging/chezhi-server-android-arm64 | grep -E 'Machine:.*AArch64'
           go version -m bin/termux-staging/chezhi-server-android-arm64 | tee bin/termux-staging/build-info.txt
           grep -F 'GOOS=android' bin/termux-staging/build-info.txt
           grep -F 'GOARCH=arm64' bin/termux-staging/build-info.txt
-          cp migration/termux/staging.sh migration/termux/README.md bin/termux-staging/migration/termux/
+          cp migration/termux/staging.sh migration/termux/supervisor.sh migration/termux/managed-backup.sh migration/termux/README.md bin/termux-staging/migration/termux/
           cp migration/postgres_runtime_grants.sql bin/termux-staging/migration/
           git rev-parse HEAD > bin/termux-staging/source-commit.txt
           printf '%s\n' 'UNSIGNED ANDROID STAGING CANDIDATE: build only; no phone or PostgreSQL 18 acceptance' > bin/termux-staging/NOTICE
-          (cd bin/termux-staging && sha256sum chezhi-server-android-arm64 migration/termux/staging.sh migration/termux/README.md migration/postgres_runtime_grants.sql source-commit.txt build-info.txt NOTICE > SHA256SUMS && sha256sum -c SHA256SUMS)
+          (cd bin/termux-staging && sha256sum chezhi-server-android-arm64 migration/termux/staging.sh migration/termux/supervisor.sh migration/termux/managed-backup.sh migration/termux/README.md migration/postgres_runtime_grants.sql source-commit.txt build-info.txt NOTICE > SHA256SUMS && sha256sum -c SHA256SUMS)
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: termux-android-arm64-unsigned-staging
