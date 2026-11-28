@@ -308,6 +308,17 @@ func main() {
 }
 func run(ctx context.Context, args []string) error {
 	if len(args) > 0 {
+		// Help and unknown option probes must never initialize a demo directory
+		// or start a listener. Explicit relative paths can use ./<directory>.
+		if strings.HasPrefix(args[0], "-") {
+			if (args[0] == "-h" || args[0] == "--help") && len(args) == 1 {
+				fmt.Println("CheZhi License: run without arguments for the configured mode, or pass a local JSON data directory.")
+				fmt.Println("Commands: health-probe, license-key-generate, db-init, db-check, db-import, db-owner-init, db-set-mode, db-recover-security, db-set-signing-key, db-signing-info.")
+				fmt.Println("See migration/SERVER.md for standalone configuration.")
+				return nil
+			}
+			return errors.New("unknown or invalid command option; use --help")
+		}
 		switch args[0] {
 		case "health-probe":
 			if len(args) != 1 {
