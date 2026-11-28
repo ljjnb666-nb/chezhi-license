@@ -112,7 +112,18 @@ kill -0 "$new"
 # The still-running child becomes unready; watchdog must request graceful
 # termination through runit and leave the supervisor responsible for restart.
 old="$new"
+# Invalid local certificate must hold rather than cause restart churn.
+cp -- "$root/tls-cert" "$root/fixture-valid-cert"
+printf 'invalid certificate\n' > "$root/tls-cert"
 touch "$HOME/fixture-unready"
+for i in $(seq 1 15); do
+    if grep -qs HEALTH_HOLD "$root/managed-v1/log-health/current"; then break; fi
+    sleep 1
+done
+grep -q 'HEALTH_HOLD invalid local TLS certificate' "$root/managed-v1/log-health/current"
+test "$(cat "$root/fixture-pid")" = "$old"
+kill -0 "$old"
+mv -- "$root/fixture-valid-cert" "$root/tls-cert"
 for i in $(seq 1 45); do
     new="$(cat "$root/fixture-pid")"
     if [ "$new" != "$old" ] && kill -0 "$new" 2>/dev/null; then break; fi
