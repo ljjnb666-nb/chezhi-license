@@ -551,3 +551,35 @@ actual-query EXPLAIN capture alongside the previous separate
 order count/page samples. Materialization and aggregation may have
 memory or spill costs; new CI results are required before claiming
 a gain. No deployment, merge, external access or phone changes.
+
+### V2 controller lifecycle follow-up (separate candidate)
+
+The capacity-passing PR #10 head cf9324c remains frozen. This separate
+follow-up introduces a fresh ~/.chezhi-gateway-local-v2 controller;
+it does not migrate, edit or delete the V1 tree. Since both bind the
+same loopback port, any V1 tree blocks V2 start until an explicitly
+reviewed maintenance procedure archives it. Do not perform that
+procedure during device endurance.
+
+Foreground runsv is exec'd directly with the controller lease on
+FD 9, removing the intermediary flock parent. Generated run, finish
+and log scripts close FD 9. The gateway service acquires an independent
+FD 8 lifetime lease before exec. Start/stop decisions serialize with
+an operation lease; stop waits up to ten iterations for the native
+supervise FIFO then uses bounded sv exit and verifies controller and
+service leases are released. Unexpected held service lease without a
+controller is a HOLD, not a successful stop. No PID discovery, arbitrary
+kill, automatic orphan removal, restart of M4 or network exposure.
+The service lease is a cooperative same-UID guard, not a security
+boundary. No promise of recovery after SIGKILL of runsv itself, which
+can also leave an orphan log process. The existing controller package
+trust and manual deployment restrictions remain.
+
+The isolated Linux runit fixture now checks the actual foreground
+PID, controller/service lease lifetime, simulated held orphan service
+lease refusal, legacy tree refusal, duplicate stop serialization,
+stop during startup and no-controller direct run rejection, in addition
+to the existing restart/log rotation and integrity tests. The synthetic
+service is a sleep process; actual Android binary FD inheritance and
+Termux runit behavior require separate device validation. The new
+branch is not a deployment or a replacement for the frozen artifact.
