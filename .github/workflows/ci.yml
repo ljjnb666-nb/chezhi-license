@@ -583,6 +583,16 @@ jobs:
         with:
           go-version: '1.26.11'
           cache: false
+      - name: Independent gateway runit and log rotation fixture
+        run: |
+          set -euo pipefail
+          if ! command -v runsv >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends runit
+          fi
+          bash -n migration/termux/gateway-service.sh
+          bash -n migration/termux/test-gateway-service.sh
+          timeout 120s bash migration/termux/test-gateway-service.sh
       - name: Loopback TLS isolation and cross-build
         run: |
           set -euo pipefail
@@ -592,9 +602,9 @@ jobs:
           CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build -trimpath -o bin/local-license-gateway/chezhi-gateway-android-arm64 ./cmd/license-gateway
           readelf -h bin/local-license-gateway/chezhi-gateway-android-arm64 | grep -E 'Machine:.*AArch64'
           git rev-parse HEAD > bin/local-license-gateway/source-commit.txt
-          cp migration/termux/GATEWAY.md migration/termux/cloudflared.disabled.yml bin/local-license-gateway/
+          cp migration/termux/GATEWAY.md migration/termux/cloudflared.disabled.yml migration/termux/gateway-service.sh bin/local-license-gateway/
           printf '%s\n' 'UNSIGNED LOCAL TEST ONLY; NO TUNNEL OR PUBLIC DEPLOYMENT' > bin/local-license-gateway/NOTICE
-          (cd bin/local-license-gateway && sha256sum chezhi-gateway-android-arm64 source-commit.txt GATEWAY.md cloudflared.disabled.yml NOTICE > SHA256SUMS && sha256sum -c SHA256SUMS)
+          (cd bin/local-license-gateway && sha256sum chezhi-gateway-android-arm64 source-commit.txt GATEWAY.md cloudflared.disabled.yml gateway-service.sh NOTICE > SHA256SUMS && sha256sum -c SHA256SUMS)
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: local-license-gateway-android-arm64-unsigned
