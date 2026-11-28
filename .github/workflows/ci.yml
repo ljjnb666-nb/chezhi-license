@@ -600,7 +600,9 @@ jobs:
           FROM postgres:18.7-alpine
           RUN apk add --no-cache python3
           DOCKERFILE
-          timeout 180s docker run --rm --network none --user postgres --entrypoint python3 \
+          fixture="chezhi-offline-archive-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          trap 'docker rm -f "$fixture" >/dev/null 2>&1 || true' EXIT
+          timeout 180s docker run --rm --name "$fixture" --network none --user postgres --entrypoint python3 \
             --mount "type=bind,source=$PWD/migration/termux,target=/fixture,readonly" \
             -e PYTHONDONTWRITEBYTECODE=1 chezhi-pg18-offline-fixture:ci \
             /fixture/test-postgres-offline-archive.py | tee bin/pg18-offline-archive.txt
