@@ -10,13 +10,17 @@ func TestAdminAdmissionIsolation(t *testing.T) {
 	h:=&serverRouter{
 		config:&serverConfig{host:"127.0.0.1:18443"},
 		admin:make(chan struct{},8),
-		adminWrite:make(chan struct{},1),
+		adminIssue:make(chan struct{},1),
 		public:make(chan struct{},3),
 	}
-	read,ri:=h.adminQueue(http.MethodGet)
-	write,wi:=h.adminQueue(http.MethodPost)
+	read,ri:=h.adminQueue(httptest.NewRequest(http.MethodGet,"http://127.0.0.1:18443/?view=overview",nil))
+	write,wi:=h.adminQueue(httptest.NewRequest(http.MethodPost,"http://127.0.0.1:18443/?view=issue",nil))
 	if ri!=0 || wi!=1 || read==write || cap(read)!=8 || cap(write)!=1 {
 		t.Fatal("unexpected admission layout")
+	}
+	for _,target:=range []string{"/account/password","/login","/?view=cards","/?view=issue&extra=1","/?view=issue&view=issue"} {
+		queue,index:=h.adminQueue(httptest.NewRequest(http.MethodPost,"http://127.0.0.1:18443"+target,nil))
+		if queue!=read || index!=0 {t.Fatalf("unexpected reserved lane for %s",target)}
 	}
 	for i:=0;i<cap(read);i++ {read<-struct{}{}}
 	select {
