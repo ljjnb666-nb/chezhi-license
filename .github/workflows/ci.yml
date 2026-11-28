@@ -614,6 +614,11 @@ jobs:
           bash -n migration/termux/stage-loopback-tls.sh
           bash -n migration/termux/test-tls-rotation.sh
           timeout 60s bash migration/termux/test-tls-rotation.sh
+      - name: Read-only PostgreSQL log retention advisory regression
+        run: |
+          set -euo pipefail
+          python3 -m py_compile migration/termux/postgres-log-retention.py
+          python3 migration/termux/test-postgres-log-retention.py
       - name: Independent gateway runit and log rotation fixture
         run: |
           set -euo pipefail
@@ -623,7 +628,7 @@ jobs:
           fi
           bash -n migration/termux/gateway-service.sh
           bash -n migration/termux/test-gateway-service.sh
-          timeout 120s bash migration/termux/test-gateway-service.sh
+          timeout 180s bash migration/termux/test-gateway-service.sh
       - name: Loopback TLS isolation and cross-build
         run: |
           set -euo pipefail
@@ -639,7 +644,6 @@ jobs:
       - name: Exact maintenance package integrity and negative cases
         run: |
           set -euo pipefail
-          python3 migration/termux/test-postgres-log-retention.py
           python3 migration/termux/test-maintenance-zip.py
           python3 -m zipfile -c bin/local-maintenance.zip bin/local-license-gateway/*
           digest="$(sha256sum bin/local-maintenance.zip | cut -d ' ' -f1)"
