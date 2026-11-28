@@ -60,7 +60,9 @@ exported="$HOME/.chezhi-encrypted-exports/$day"
 test -f "$exported/database.dump.age"
 test ! -e "$exported/database.dump"
 if bash "$tmp/export.sh" "$day" "$recipient"; then echo 'overwrite accepted'; exit 1; fi
-receive() { bash "$src/encrypted-receive.sh" "$@"; }
+trusted="$(sha256sum "$exported/database.dump.age" | cut -d ' ' -f1)"
+receive() { bash "$src/encrypted-receive.sh" "$@" "$trusted"; }
+if bash "$src/encrypted-receive.sh" "$exported" "$tmp/receiver/identity" "$tmp/receiver/missing"; then echo 'missing trusted digest accepted'; exit 1; fi
 if receive "$exported" "$tmp/receiver/wrong-identity" "$tmp/receiver/wrong"; then echo 'wrong identity accepted'; exit 1; fi
 test ! -e "$tmp/receiver/wrong"
 cp -a "$exported" "$tmp/receiver/tampered"
@@ -69,6 +71,17 @@ if receive "$tmp/receiver/tampered" "$tmp/receiver/identity" "$tmp/receiver/bad-
 (cd "$tmp/receiver/tampered" && sha256sum database.dump.age > SHA256SUMS)
 if receive "$tmp/receiver/tampered" "$tmp/receiver/identity" "$tmp/receiver/bad-auth"; then echo 'tamper with rewritten hash accepted'; exit 1; fi
 test ! -e "$tmp/receiver/bad-hash" && test ! -e "$tmp/receiver/bad-auth"
+# Even a valid new age ciphertext for this recipient must not replace the
+# independently authenticated original. Separately test AEAD rejection
+# with a trusted digest deliberately set to the damaged ciphertext.
+damaged="$(sha256sum "$tmp/receiver/tampered/database.dump.age" | cut -d ' ' -f1)"
+if bash "$src/encrypted-receive.sh" "$tmp/receiver/tampered" "$tmp/receiver/identity" "$tmp/receiver/bad-aead" "$damaged"; then echo 'damaged authenticated stream accepted'; exit 1; fi
+cp -a "$exported" "$tmp/receiver/substitute"
+rm -- "$tmp/receiver/substitute/database.dump.age"
+age -r "$recipient" -o "$tmp/receiver/substitute/database.dump.age" "$daily/$day/database.dump"
+(cd "$tmp/receiver/substitute" && sha256sum database.dump.age > SHA256SUMS)
+if receive "$tmp/receiver/substitute" "$tmp/receiver/identity" "$tmp/receiver/bad-sender"; then echo 'substituted valid ciphertext accepted'; exit 1; fi
+test ! -e "$tmp/receiver/bad-aead" && test ! -e "$tmp/receiver/bad-sender"
 receive "$exported" "$tmp/receiver/identity" "$tmp/receiver/recovered"
 test "$(sha256sum "$tmp/receiver/recovered/database.dump" | cut -d ' ' -f1)" = "$(printf '%s\n' "$before" | cut -d ' ' -f1)"
 if receive "$exported" "$tmp/receiver/identity" "$tmp/receiver/recovered"; then echo 'receiver overwrite accepted'; exit 1; fi
