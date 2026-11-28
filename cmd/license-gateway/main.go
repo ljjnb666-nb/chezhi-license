@@ -242,6 +242,8 @@ func run() error {
 	leaf, err := x509.ParseCertificate(pair.Certificate[0])
 	if err != nil || leaf.VerifyHostname("127.0.0.1") != nil || time.Now().Before(leaf.NotBefore) || time.Now().After(leaf.NotAfter) { return errors.New("gateway certificate must cover 127.0.0.1 and be current") }
 	if checkTLS { return tlsStatus(g.upstream.Host,roots,leaf) }
+	statusDir:=os.Getenv("CHEZHI_GATEWAY_STATUS_DIR")
+	if statusDir!="" {if err:=validateStatusDir(statusDir);err!=nil{return err}}
 	l, err := net.Listen("tcp",listen)
 	if err != nil { return errors.New("cannot open gateway loopback listener") }
 	defer l.Close()
@@ -249,7 +251,7 @@ func run() error {
 	srv := &http.Server{Handler:metrics.wrap(g), TLSConfig:&tls.Config{MinVersion:tls.VersionTLS12, Certificates:[]tls.Certificate{pair}}, ReadHeaderTimeout:3*time.Second, ReadTimeout:8*time.Second, WriteTimeout:18*time.Second, IdleTimeout:15*time.Second, MaxHeaderBytes:8192, ErrorLog:log.New(io.Discard,"",0)}
 	ctx, stop := signal.NotifyContext(context.Background(),os.Interrupt,syscall.SIGTERM)
 	defer stop()
-	go metrics.monitor(ctx,log.Default(),time.Minute)
+	go metrics.monitorStatus(ctx,log.Default(),time.Minute,statusDir)
 	go monitorTLS(ctx,log.Default(),15*time.Minute,g.upstream.Host,roots,leaf)
 	errs := make(chan error,1)
 	go func(){ errs <- srv.ServeTLS(&limitedListener{Listener:l,slots:make(chan struct{},32),done:make(chan struct{})},"","") }()
