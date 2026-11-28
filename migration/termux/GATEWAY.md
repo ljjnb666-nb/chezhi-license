@@ -210,3 +210,49 @@ start the candidate on the phone if it would interrupt M4 endurance.
 No gateway watchdog, boot integration, external tunnel supervisor,
 PostgreSQL log rotation, external notification or public routing is
 implemented by this controller. Those require separate review.
+
+### PostgreSQL and origin TLS maintenance preflight
+
+CI 46120606866 (head 360d6dc, checkout 5689c29) completed 13/13.
+The real runit fixture passed restart, rotation, duplicate denial,
+controlled stop, M4 preservation and tamper refusal. The signed paced
+fixture passed 24/24 renewals in 77.37s (sample P95 11.92ms).
+The candidate dashboard 500ms target passed in that run, but 14/320
+mixed reads returned 503 and issuance returned fifteen 503s before
+success. Do not treat one green comparison as sustained capacity.
+
+maintenance-preflight.sh is read-only and targets the existing
+Termux private staging directory. It checks protected file modes,
+origin TLS certificate/key correspondence, IP SAN and validity,
+trusted readiness, selected PostgreSQL settings using read-only
+session defaults, legacy log size and free space. It prints no
+private key, DSN, SQL text from traffic or log contents. A seven-day
+expiry warning does not replace an operator maintenance decision.
+It does not install a controller, rotate certificates, change
+database configuration or restart any service.
+
+postgres-logging.candidate.conf is an unapplied native PG18 collector
+profile with time/size rotation, UTC timestamped file names, 0600
+log files and conservative statement/parameter logging settings.
+PostgreSQL documentation:
+https://www.postgresql.org/docs/18/runtime-config-logging.html
+https://www.postgresql.org/docs/18/logfile-maintenance.html
+Rotation is not a hard size cap or retention policy; log messages may
+still contain sensitive context, and old files can accumulate.
+No automatic deletion is introduced. The separate CI fixture applies
+the exact profile in a disposable network-isolated PG18 container,
+restarts that fixture only, verifies current settings and an explicit
+native rotation with unchanged postmaster start time. Natural
+time/size rotation and retention require additional tests.
+
+Do not apply this profile to M4 during endurance. After the endurance
+gate and explicit maintenance approval: inventory settings, preserve
+configuration and legacy logs, verify a recoverable backup, review
+conflicting overrides, stage the profile, stop managed gateway/app
+before a controlled database restart, verify actual settings and
+readiness, record new log path and modes, then run isolated signed
+business checks and backup verification. If any check fails, restore
+the reviewed previous configuration and perform controlled rollback.
+Do not truncate open legacy logs or restart an unidentified cluster.
+The TLS renewal itself remains a separate coordinated operation;
+no automatic certificate replacement or production change is included.
