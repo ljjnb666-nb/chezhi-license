@@ -46,6 +46,7 @@ type gateway struct {
 	upstream *url.URL
 	client *http.Client
 	slots chan struct{}
+	budget *requestBudget
 }
 
 func newGateway(host, target string, roots *x509.CertPool) (*gateway, error) {
@@ -62,13 +63,13 @@ func newGateway(host, target string, roots *x509.CertPool) (*gateway, error) {
 		TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots, ServerName: "127.0.0.1"},
 		TLSHandshakeTimeout: 3*time.Second,
 		ResponseHeaderTimeout: 8*time.Second,
-		MaxConnsPerHost: 8, MaxIdleConnsPerHost: 4, IdleConnTimeout: 30*time.Second,
+		MaxConnsPerHost: 2, MaxIdleConnsPerHost: 2, IdleConnTimeout: 30*time.Second,
 		DisableCompression: true,
 	}
 	return &gateway{host:host, upstream:u, client:&http.Client{
 		Transport:t, Timeout:12*time.Second,
 		CheckRedirect:func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-	}, slots:make(chan struct{},8)}, nil
+	}, slots:make(chan struct{},2), budget:newBudget(time.Now())}, nil
 }
 
 func reject(w http.ResponseWriter, status int, code string) {
@@ -153,6 +154,10 @@ func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		var tooLarge *http.MaxBytesError
 		if errors.As(err,&tooLarge) { reject(w,413,"body_too_large") } else { reject(w,400,"invalid_input") }
 		return
+	}
+	// Count every attempted upstream request, even if the origin is down.
+	if ok,retry:=g.budget.allow(time.Now()); !ok {
+		w.Header().Set("Retry-After",strconv.Itoa(retry)); reject(w,429,"rate_limited"); return
 	}
 	// Construct a fresh request; never forward caller headers, source IP,
 	// cookies, proxy metadata, auth or an arbitrary destination.
