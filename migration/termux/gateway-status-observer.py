@@ -263,6 +263,9 @@ def durable_sample(fd, observer, current, emit, now=None):
     state = {"version": 1, "last": observer.last, "unavailable": observer.unavailable,
              "updated_utc": updated,
              "pending": [{"id": uuid.uuid4().hex, "event": event} for event in events]}
+    previous = read_state(fd)
+    if previous is not None and (previous["pending"] or stamp(updated) < stamp(previous["updated_utc"])):
+        raise ValueError("unacknowledged batch or checkpoint clock rollback")
     save_state(fd, state)
     deliver(fd, state, emit)
     return state
@@ -424,6 +427,10 @@ class Tests(unittest.TestCase):
             state = read_state(fd)
             self.assertEqual(len(state["pending"]), 2)
             self.assertFalse(heartbeat_ok(state, self.now))
+            with self.assertRaises(ValueError):
+                durable_sample(fd, restore_observer(state), opened, lambda event: None, self.now)
+            self.assertEqual(read_state(fd), state)  # never overwrite unacknowledged events
+
             replay = []
             deliver(fd, state, replay.append)
             self.assertEqual(replay[0], received[0])
@@ -441,6 +448,10 @@ class Tests(unittest.TestCase):
             closed = {**self.s, "observed_utc": "2026-11-28T12:00:01Z"}
             durable_sample(fd, o, closed, replay.append, self.now + dt.timedelta(seconds=1))
             self.assertEqual(replay, [])  # no inferred recovery across restart
+            with self.assertRaises(ValueError):
+                durable_sample(fd, o, None, replay.append, self.now)
+            self.assertEqual(read_state(fd)["updated_utc"], "2026-11-28T12:00:01Z")
+
 
     @unittest.skipUnless(os.name == "posix", "POSIX checkpoint contract")
     def test_checkpoint_fail_closed(self):
