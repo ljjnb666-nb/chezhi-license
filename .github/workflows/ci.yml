@@ -454,12 +454,22 @@ jobs:
           ENFORCE_TARGET: ${{ inputs.enforce_dashboard_slo }}
         run: |
           set -euo pipefail
-          CHEZHI_AUDITED_BASELINE=1 python3 migration/server_acceptance.py ./bin/performance/audited | tee bin/performance/audited.txt
+          baseline_status=0
+          CHEZHI_AUDITED_BASELINE=1 python3 migration/server_acceptance.py ./bin/performance/audited | tee bin/performance/audited.txt || baseline_status=$?
           enforce=0
           if [ "$ENFORCE_TARGET" = true ]; then enforce=1; fi
-          CHEZHI_REQUIRE_PERF="$enforce" python3 migration/server_acceptance.py ./bin/performance/optimized | tee bin/performance/optimized.txt
-          echo "### HTTPS 500 ms target (median of three trial P95s)" >> "$GITHUB_STEP_SUMMARY"
-          grep -E '^(SLO|PERFORMANCE_500MS_TARGET)' bin/performance/optimized.txt >> "$GITHUB_STEP_SUMMARY"
+          candidate_status=0
+          CHEZHI_REQUIRE_PERF="$enforce" python3 migration/server_acceptance.py ./bin/performance/optimized | tee bin/performance/optimized.txt || candidate_status=$?
+          {
+            echo "### HTTPS 500 ms target (median of three trial P95s)"
+            echo "Baseline exit: $baseline_status; candidate exit: $candidate_status"
+            grep -E '^(SLO|PERFORMANCE_500MS_TARGET)' bin/performance/audited.txt || true
+            grep -E '^(SLO|PERFORMANCE_500MS_TARGET)' bin/performance/optimized.txt || true
+          } >> "$GITHUB_STEP_SUMMARY"
+          # Collect both independent profiles, but never suppress a failure.
+          test "$baseline_status" -eq 0
+          test "$candidate_status" -eq 0
+          grep -E '^PERFORMANCE_500MS_TARGET (PASS|MISS)' bin/performance/optimized.txt
       - if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
