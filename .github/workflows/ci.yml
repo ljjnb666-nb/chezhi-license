@@ -598,6 +598,12 @@ jobs:
         with:
           go-version: '1.26.11'
           cache: false
+      - name: Isolated loopback TLS trust transition and rollback
+        run: |
+          set -euo pipefail
+          bash -n migration/termux/stage-loopback-tls.sh
+          bash -n migration/termux/test-tls-rotation.sh
+          timeout 60s bash migration/termux/test-tls-rotation.sh
       - name: Independent gateway runit and log rotation fixture
         run: |
           set -euo pipefail
