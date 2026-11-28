@@ -148,7 +148,11 @@ func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		w.Header().Set("Retry-After","1"); reject(w,503,"busy"); return
 	}
-	r.Body = http.MaxBytesReader(w,r.Body,maxBody)
+	// Preserve net/http's native oversized-body handling when metrics wrap
+	// the writer, rather than hiding the original server response.
+	bodyWriter:=w
+	if measured,ok:=w.(*measuredResponse);ok {bodyWriter=measured.ResponseWriter}
+	r.Body = http.MaxBytesReader(bodyWriter,r.Body,maxBody)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		var tooLarge *http.MaxBytesError
@@ -241,9 +245,12 @@ func run() error {
 	l, err := net.Listen("tcp",listen)
 	if err != nil { return errors.New("cannot open gateway loopback listener") }
 	defer l.Close()
-	srv := &http.Server{Handler:g, TLSConfig:&tls.Config{MinVersion:tls.VersionTLS12, Certificates:[]tls.Certificate{pair}}, ReadHeaderTimeout:3*time.Second, ReadTimeout:8*time.Second, WriteTimeout:18*time.Second, IdleTimeout:15*time.Second, MaxHeaderBytes:8192, ErrorLog:log.New(io.Discard,"",0)}
+	metrics:=&gatewayMetrics{}
+	srv := &http.Server{Handler:metrics.wrap(g), TLSConfig:&tls.Config{MinVersion:tls.VersionTLS12, Certificates:[]tls.Certificate{pair}}, ReadHeaderTimeout:3*time.Second, ReadTimeout:8*time.Second, WriteTimeout:18*time.Second, IdleTimeout:15*time.Second, MaxHeaderBytes:8192, ErrorLog:log.New(io.Discard,"",0)}
 	ctx, stop := signal.NotifyContext(context.Background(),os.Interrupt,syscall.SIGTERM)
 	defer stop()
+	go metrics.monitor(ctx,log.Default(),time.Minute)
+	go monitorTLS(ctx,log.Default(),15*time.Minute,g.upstream.Host,roots,leaf)
 	errs := make(chan error,1)
 	go func(){ errs <- srv.ServeTLS(&limitedListener{Listener:l,slots:make(chan struct{},32),done:make(chan struct{})},"","") }()
 	log.Print("local license gateway started")
@@ -251,7 +258,9 @@ func run() error {
 	case err := <-errs: return err
 	case <-ctx.Done():
 		c,cancel := context.WithTimeout(context.Background(),20*time.Second); defer cancel()
-		return srv.Shutdown(c)
+		err:=srv.Shutdown(c)
+		metrics.report(log.Default())
+		return err
 	}
 }
 
