@@ -224,7 +224,8 @@ type serverRouter struct {
 	config                       *serverConfig
 	gateway                      *adminGateway
 	pg                           *postgresStore
-	public, admin, export, ready chan struct{}
+	public, admin, adminWrite, export, ready chan struct{}
+	admissionRejected [4]atomic.Uint64
 	metrics                      [3]requestMetric
 	draining                     atomic.Bool
 }
@@ -290,6 +291,16 @@ func (w *serverResponse) Write(data []byte) (int, error) {
 }
 func (w *serverResponse) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
+// Keep one bounded administrative mutation slot independent of the read
+// slots. Authentication, CSRF, database transactions and public admission
+// are unchanged. This is isolation, not an unlimited writer queue.
+func (h *serverRouter) adminQueue(method string) (chan struct{}, int) {
+	if method == http.MethodPost {
+		return h.adminWrite, 1
+	}
+	return h.admin, 0
+}
+
 func (h *serverRouter) ServeHTTP(raw http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 12*time.Second)
 	defer cancel()
@@ -297,12 +308,13 @@ func (h *serverRouter) ServeHTTP(raw http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	id := randomToken()[:32]
 	group, label := 0, "admin"
-	queue := h.admin
+	queue, admission := h.adminQueue(r.Method)
 	v2 := isV2Path(r.URL.Path)
 	isAPI := v2 || strings.HasPrefix(r.URL.Path, "/api/v1/") || r.URL.Path == "/api/v1"
 	switch {
 	case isAPI || r.URL.Path == "/activate" || r.URL.Path == "/purchase" || r.URL.Path == "/api/demo/activate":
 		group, label, queue = 1, "public", h.public
+		admission = 2
 	case r.URL.Path == "/healthz" || r.URL.Path == "/readyz":
 		group, label = 2, "health"
 	}
@@ -357,6 +369,7 @@ func (h *serverRouter) ServeHTTP(raw http.ResponseWriter, r *http.Request) {
 	case queue <- struct{}{}:
 		defer func() { <-queue }()
 	default:
+		h.admissionRejected[admission].Add(1)
 		w.Header().Set("Retry-After", "1")
 		reject(503, "busy")
 		return
@@ -366,6 +379,7 @@ func (h *serverRouter) ServeHTTP(raw http.ResponseWriter, r *http.Request) {
 		case h.export <- struct{}{}:
 			defer func() { <-h.export }()
 		default:
+			h.admissionRejected[3].Add(1)
 			reject(503, "busy")
 			return
 		}
@@ -425,6 +439,9 @@ func (h *serverRouter) diagnostics(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintf(w, "chezhi_http_requests_total{group=%q} %d\nchezhi_http_errors_total{group=%q} %d\nchezhi_http_duration_seconds_sum{group=%q} %f\n",
 				label, m.count.Load(), label, m.failed.Load(), label, float64(m.nanos.Load())/1e9)
 		}
+		for i, label := range []string{"admin_read", "admin_write", "public", "export"} {
+			fmt.Fprintf(w, "chezhi_admission_rejected_total{group=%q} %d\n", label, h.admissionRejected[i].Load())
+		}
 		s := h.pg.db.Stats()
 		fmt.Fprintf(w, "chezhi_db_connections_open %d\nchezhi_db_connections_in_use %d\nchezhi_db_connections_idle %d\nchezhi_db_pool_waits_total %d\n", s.OpenConnections, s.InUse, s.Idle, s.WaitCount)
 	default:
@@ -450,7 +467,7 @@ func serveIndependent(ctx context.Context, c serverConfig, p *postgresStore) err
 	if gateway.loadErr != nil || gateway.owner == nil {
 		return errors.New("server requires a configured owner credential; run db-owner-init")
 	}
-	h := &serverRouter{config: &c, gateway: gateway, pg: p, admin: make(chan struct{}, 8), public: make(chan struct{}, 3), export: make(chan struct{}, 1), ready: make(chan struct{}, 2)}
+	h := &serverRouter{config: &c, gateway: gateway, pg: p, admin: make(chan struct{}, 8), adminWrite: make(chan struct{}, 1), public: make(chan struct{}, 3), export: make(chan struct{}, 1), ready: make(chan struct{}, 2)}
 	srv := &http.Server{Handler: h, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 15 * time.Second,
 		IdleTimeout: 30 * time.Second, MaxHeaderBytes: 8192, ErrorLog: slog.NewLogLogger(slog.Default().Handler(), slog.LevelWarn)}
 	if c.certificate != nil {
