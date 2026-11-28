@@ -563,6 +563,11 @@ jobs:
           go test -race -run '^TestPostgres' -count=1 -v ./... | tee bin/pg18-test.txt
           CGO_ENABLED=0 go build -trimpath -o bin/chezhi-license .
           python3 migration/postgres_acceptance.py ./bin/chezhi-license | tee bin/pg18-acceptance.txt
+      - name: Native log rotation on a separate disposable PostgreSQL 18 cluster
+        run: |
+          set -euo pipefail
+          bash -n migration/termux/test-postgres-logging.sh
+          timeout 150s bash migration/termux/test-postgres-logging.sh | tee bin/pg18-log-rotation.txt
       - if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
