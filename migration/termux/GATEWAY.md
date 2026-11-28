@@ -439,3 +439,30 @@ issuance query falling into the shared lane. Re-run both standalone
 and repeated dashboard gates on the revised candidate; do not
 attribute the earlier zero-503 result to this untested revision.
 No activation, merge, or phone operation.
+
+### Dashboard SQL follow-up
+
+CI 46126700580 (head ccc5218, checkout 6975c44) passed 13/13.
+The original exact concurrent account quota assertions passed again.
+At both 10k and 100k cards the mixed profile had 320/320 successful
+reads, first-attempt issuance, and zero admission rejection deltas.
+The single-trial 500ms target passed, but repeated overview/order
+P95 was 688.9/658.7ms; the comparison job is not a sustained SLO gate.
+Representative EXPLAIN ANALYZE logged optimized overview-status
+33.02ms, overview-sales 45.51ms, filtered order page 30.29ms with
+26830 shared buffer hits. These are single query samples, not HTTP
+latency, nor proof of the sole remaining bottleneck.
+
+The new SQL-only candidate uses fixed numeric status counts instead
+of grouping localized strings, preserving revoked/expiry/activation
+precedence and NULL expiry for perpetual cards. The default order
+page groups narrow ref/max(position) keys before joining only the
+selected orders and counting page details. It preserves exact order
+position semantics, pagination, exclusion of empty orders and the
+existing filtered path. The count and page still use the same
+repeatable-read transaction. No migration, cache, approximate count,
+pool change, or altered access control. Added parity coverage for
+perpetual active cards, empty orders and filtered/unfiltered pages,
+and plan capture for the new default order path and its prior form.
+Actual performance benefit is not established until CI runs.
+No phone or public service activation.
