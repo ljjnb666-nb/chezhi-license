@@ -32,8 +32,17 @@ hostname. The gateway requires the exact configured external DNS Host.
 Responses are limited to expected status codes and JSON, with only
 selected request ID and retry headers; no cookies or Location.
 
-Limits: 4096-byte request, 32768-byte reply, 8 simultaneous application
+Limits: 4096-byte request, 32768-byte reply, 2 simultaneous application
 requests, 32 accepted TCP connections, bounded transport timeouts.
+A process-local shared token bucket admits an initial burst of 12 and
+refills 48 tokens per minute. Every attempted upstream request consumes
+one token, including unsuccessful upstream attempts. Budget exhaustion
+returns 429 with Retry-After; concurrent saturation returns 503. The
+origin's default source quota is 60/minute and public concurrency is 3;
+these conservative gateway defaults leave headroom but cannot reserve
+origin capacity from other local callers. A gateway restart resets its
+local bucket, not the authoritative origin quota. This is not a
+per-client limiter, a persistent quota or a measured throughput promise.
 The existing server's source rate budget will see the local gateway as
 one source. Do not widen it or trust caller-supplied client IP to improve
 throughput. Per-client abuse controls, edge quotas, connection saturation
@@ -84,3 +93,38 @@ Before any external access, independently verify:
 Public connectivity, cloudflared service activation, external routing,
 production trust and production release remain HOLD. The M4 24/72h
 endurance window must not be reset solely to test this source branch.
+
+## Reliability follow-up (separate candidate)
+
+The last physically accepted gateway is head 99f418d, artifact 15252152019.
+The new reliability branch does not replace that candidate or the M4
+controller. Validate the new binary and tests before any local trial.
+
+With the same four reviewed CHEZHI_GATEWAY_* environment variables, the
+new binary supports a read-only tls-status command. It loads the local
+certificate/key pair and checks current validity and loopback IP SAN,
+then performs a real certificate-verified TLS handshake to the fixed
+backend. It reports the gateway leaf and earliest verified origin-chain
+expiration in UTC, exits nonzero for failed trust or expiry within seven
+days, and does not open a gateway listener or send an HTTP request.
+A successful check does not prove database readiness or public edge
+certificate validity. No automatic certificate replacement, key
+distribution, origin restart or boot hook is implemented.
+
+Rotation policy: stage separate fresh TLS credentials in a private
+directory and independently verify the new IP SAN, validity and trust
+before an approved maintenance window. Keep old known-good credentials
+protected for rollback; review all consumers of the origin certificate
+including the controller health/backup probes. Coordinate trust updates
+and the actual server restart; do not edit live TLS files or bypass
+validation during M4 endurance. After maintenance, independently verify
+readiness, both TLS hops, backups and synthetic signed V2 requests.
+Public edge trust/expiry and authenticated per-client edge limits are
+separate release gates. Never use arbitrary client-provided forwarding
+headers as source identity.
+
+The automated tests exercise deterministic token accounting, concurrent
+admission, a real two-hop TLS fixture with blocked origin handlers,
+503/429 refusal and recovery, and read-only certificate status. These
+are bounded fixtures, not a sustained phone capacity benchmark. No
+tunnel launch, public access, or third-party network change.
