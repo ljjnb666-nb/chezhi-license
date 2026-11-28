@@ -568,6 +568,16 @@ jobs:
           set -euo pipefail
           bash -n migration/termux/test-postgres-logging.sh
           timeout 150s bash migration/termux/test-postgres-logging.sh | tee bin/pg18-log-rotation.txt
+      - name: Authenticated encrypted archive and disposable PostgreSQL 18 restore
+        run: |
+          set -euo pipefail
+          if ! command -v age >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends age
+          fi
+          age --version
+          for script in migration/termux/encrypted-{export,receive}.sh migration/termux/test-encrypted-backup.sh; do bash -n "$script"; done
+          timeout 180s bash migration/termux/test-encrypted-backup.sh | tee bin/pg18-encrypted-backup.txt
       - if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
