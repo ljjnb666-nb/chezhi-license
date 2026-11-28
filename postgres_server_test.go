@@ -143,6 +143,34 @@ func TestPostgresOverviewEmptyAndTestOnly(t *testing.T) {
 	check()
 }
 
+func TestPostgresUnfilteredOrderCountAndPage(t *testing.T) {
+	s, _ := postgresFixture(t)
+	pgInitialize(t, s)
+	now := time.Date(2026, 11, 28, 16, 0, 0, 0, time.UTC)
+	s.now = func() time.Time { return now }
+	check := func() {
+		t.Helper()
+		state := pgSnapshot(t, s)
+		for _, raw := range []string{"", "1", "2", "3", "99", "0", "-1", "invalid", "9999999999999999999999999999999"} {
+			q := url.Values{"op": {raw}}
+			v := View{Section:"orders", Now:now}
+			if err := s.pg.dashboardPage(context.Background(), &v, q); err != nil { t.Fatal(raw,err) }
+			want := buildOperations(state, now, "orders", q)
+			got := v.Operations
+			if got.Count != want.Count || got.Page != want.Page || got.Pages != want.Pages ||
+				got.Prev != want.Prev || got.Next != want.Next || !reflect.DeepEqual(got.Orders,want.Orders) {
+				t.Fatalf("order page parity failed op=%q got count/page/pages=%d/%d/%d want=%d/%d/%d",raw,got.Count,got.Page,got.Pages,want.Count,want.Page,want.Pages)
+			}
+		}
+	}
+	check()
+	for i:=0;i<23;i++ {
+		if _,err:=s.issue(30,1,100,"wechat",fmt.Sprintf("page-fixture-%02d",i)); err!=nil {t.Fatal(err)}
+	}
+	pgExec(t,s,"INSERT INTO chezhi_orders(ref,channel,cents,days,created) VALUES ('page-empty-order','wechat',10,30,$1)",sqlTime(now))
+	check()
+}
+
 func TestPostgresServerDashboardScale(t *testing.T) {
 	const readers = 16
 	const perSection = 32
