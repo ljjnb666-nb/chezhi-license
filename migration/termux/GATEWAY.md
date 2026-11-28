@@ -128,3 +128,24 @@ admission, a real two-hop TLS fixture with blocked origin handlers,
 503/429 refusal and recovery, and read-only certificate status. These
 are bounded fixtures, not a sustained phone capacity benchmark. No
 tunnel launch, public access, or third-party network change.
+
+### Paced reliability evidence
+
+The first reliability CI (46118826007, head 1d5fe8c, merge checkout
+1795883) completed 12/13 jobs successfully. Gateway race tests, real V2
+integration, certificate warnings and Android packaging passed. The
+dashboard comparison stopped in the historical baseline's mixed
+issuance phase; the proposed dashboard comparison was not reached.
+Do not waive or weaken the comparison gate because gateway tests passed.
+
+The standalone acceptance now requires GATEWAY_PACED: a disposable
+PostgreSQL fixture, actual compiled gateway, default origin source
+quota of 60/minute, 24 signed renewals (48 HTTPS requests) paced over at
+least 75 seconds, no retry and no quota reset during the window. The
+test requires unique nonces, unchanged binding/card snapshots, matching
+revision and expiry, and independent signature verification. Reported
+P95 combines challenge/sign preparation and renewal request samples;
+it is not pure transport latency or maximum throughput. Separate real
+TCP listener tests cover slot exhaustion, double close, release and
+shutdown while admission is blocked. The test cannot establish a
+production concurrency limit or sustained phone/Cloudflare capacity.
