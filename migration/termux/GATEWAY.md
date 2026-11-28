@@ -609,3 +609,29 @@ separate real PG18 native rotation test. Frozen PR #10 package remains
 The stacked PR workflow now covers its actual base branch and the
 dedicated maintenance push branch, which previously matched neither
 trigger. No production activation or phone change.
+
+### V2 concurrent stop budget correction
+
+CI 46131078774 (head f15a83e, checkout 15cd362) executed after the
+stacked workflow trigger correction: 12/13 passed. Both strict
+capacity profiles passed, as did PG18 native logging and encrypted
+synthetic restore. The gateway runit fixture reached duplicate start
+refusal and simulated orphan service refusal but failed concurrent
+stop with "Controller operation busy." The original 10s operation
+wait was shorter than a normal shutdown with the 10s finish delay.
+The subsequent successful stop is not evidence that both callers
+succeeded. Retention and ZIP verification steps were not reached.
+
+Stop now allows a bounded 75s operation-lock wait for a previous
+stop (up to 10s startup wait, 45s native exit, 10s controller release,
+and two 5s child lease checks). Start retains its 10s operation wait.
+The logger holds its own FD 6 lease; start and stop refuse a surviving
+logger without a controller, and successful stop requires both child
+leases to release. The fixture tests a synthetic surviving logger,
+actual svlogd lease ownership, both concurrent stop exit codes and
+all three post-stop lease releases. Test timeout is 180s. Read-only
+log inventory now has a separate earlier CI step, so lifecycle
+failure cannot hide that test. No PID scanning, automatic orphan
+termination or active log deletion. The actual Android descriptor
+inheritance and abrupt supervisor-death recovery remain unverified.
+No performance or phone changes; PR #10 remains frozen.
