@@ -180,6 +180,20 @@ FROM page p CROSS JOIN LATERAL (
         count(*) FILTER (WHERE c.revoked) AS revoked FROM chezhi_cards c WHERE c.ref=p.ref
 ) q ORDER BY p.position DESC`
 
+// The unfiltered path aggregates only ref/position before fetching the
+// visible orders. It avoids a separate index descent for every order.
+// Keep last-card position ordering (not order creation time), exclude
+// orders with no cards, and aggregate details for the visible page only.
+const ordersUnfilteredPageSQL = `WITH page AS (
+    SELECT ref,max(position) AS position FROM chezhi_cards
+    GROUP BY ref ORDER BY max(position) DESC LIMIT 20 OFFSET $1
+)
+SELECT o.ref,o.channel,o.created,o.days,q.cards,q.activated,q.revoked,q.cards::numeric*o.cents
+FROM page p JOIN chezhi_orders o USING(ref) CROSS JOIN LATERAL (
+    SELECT count(*) AS cards,count(*) FILTER (WHERE c.activated IS NOT NULL) AS activated,
+        count(*) FILTER (WHERE c.revoked) AS revoked FROM chezhi_cards c WHERE c.ref=p.ref
+) q ORDER BY p.position DESC`
+
 func readOrdersPage(ctx context.Context, tx *sql.Tx, o *Operations, q url.Values) error {
 	args := []any{o.Channel, strings.ToLower(o.Q)}
 	if tx.QueryRowContext(ctx, "SELECT count(*) FROM chezhi_orders o"+orderFilterSQL+
@@ -187,8 +201,13 @@ func readOrdersPage(ctx context.Context, tx *sql.Tx, o *Operations, q url.Values
 		return errDatabase
 	}
 	o.Page, o.Pages = pageNum(q.Get("op"), o.Count)
-	rows, err := tx.QueryContext(ctx, ordersPageSQL, append(args, (o.Page-1)*20)...)
-
+	var rows *sql.Rows
+	var err error
+	if o.Channel == "" && o.Q == "" {
+		rows, err = tx.QueryContext(ctx, ordersUnfilteredPageSQL, (o.Page-1)*20)
+	} else {
+		rows, err = tx.QueryContext(ctx, ordersPageSQL, append(args, (o.Page-1)*20)...)
+	}
 	if err != nil {
 		return errDatabase
 	}
