@@ -24,8 +24,8 @@ func TestExactRoutesAndHeaderIsolation(t *testing.T) {
 		}
 		w.Header().Set("Content-Type","application/json")
 		w.Header().Set("Set-Cookie","private=1")
-		w.Header().Set("X-Request-ID","test-id")
-		io.WriteString(w,`{"version":"v2","data":{}}`)
+		w.Header().Set("X-Request-ID","0123456789abcdef0123456789abcdef")
+		io.WriteString(w,`{"version":"v2","request_id":"0123456789abcdef0123456789abcdef","data":{}}`)
 	}))
 	defer up.Close()
 	roots:=x509.NewCertPool()
@@ -45,7 +45,7 @@ func TestExactRoutesAndHeaderIsolation(t *testing.T) {
 		if rec.Code!=want { t.Fatalf("%s %s: got %d want %d (%s)",method,path,rec.Code,want,rec.Body.String()) }
 		delta:=calls.Load()-before
 		if want==200 {
-			if delta!=1 || rec.Header().Get("Set-Cookie")!="" || rec.Header().Get("X-Request-ID")!="test-id" { t.Fatal("response/header isolation failed") }
+			if delta!=1 || rec.Header().Get("Set-Cookie")!="" || rec.Header().Get("X-Request-ID")!="0123456789abcdef0123456789abcdef" { t.Fatal("response/header isolation failed") }
 		} else if delta!=0 { t.Fatalf("denied request reached upstream: %s",path) }
 	}
 	host:="license.example.invalid"
@@ -140,4 +140,28 @@ func TestBoundariesAndFailureEnvelopes(t *testing.T) {
 	up.Close()
 	request("/api/v2/licenses/renew","{}",2,503)
 	if len(g.slots)!=0 {t.Fatal("request slots leaked")}
+}
+
+func TestResponseEnvelopeContract(t *testing.T) {
+	const id="0123456789abcdef0123456789abcdef"
+	const ok=`{"version":"v2","request_id":"0123456789abcdef0123456789abcdef","data":{}}`
+	const denied=`{"version":"v2","request_id":"0123456789abcdef0123456789abcdef","error":{"code":"authorization_denied"}}`
+	for _, tc:=range []struct{body string;status int;ids []string;valid bool}{
+		{ok,200,[]string{id},true},
+		{denied,403,[]string{id},true},
+		{ok,403,[]string{id},false},
+		{denied,200,[]string{id},false},
+		{ok,200,nil,false},
+		{ok,200,[]string{id,id},false},
+		{ok,200,[]string{strings.Repeat("a",32)},false},
+		{strings.Replace(ok,"v2","v1",1),200,[]string{id},false},
+		{strings.Replace(ok,`"data":{}`,`"data":null`,1),200,[]string{id},false},
+		{strings.Replace(ok,`"data":{}`,`"data":{},"error":{}`,1),200,[]string{id},false},
+		{strings.Replace(ok,`"data":{}`,`"data":{},"data":{}`,1),200,[]string{id},false},
+		{ok+"{}",200,[]string{id},false},
+		{`[]`,200,[]string{id},false},
+	} {
+		got,valid:=responseID([]byte(tc.body),tc.status,tc.ids)
+		if valid!=tc.valid || (valid && got!=id) { t.Fatalf("envelope contract: status=%d body=%s valid=%t",tc.status,tc.body,valid) }
+	}
 }
