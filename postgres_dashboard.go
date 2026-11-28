@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -161,34 +162,66 @@ FROM page p CROSS JOIN LATERAL (
         count(*) FILTER (WHERE c.revoked) AS revoked FROM chezhi_cards c WHERE c.ref=p.ref
 ) q ORDER BY p.position DESC`
 
-// The unfiltered path aggregates only ref/position before fetching the
-// visible orders. It avoids a separate index descent for every order.
-// Keep last-card position ordering (not order creation time), exclude
-// orders with no cards, and aggregate details for the visible page only.
-const ordersUnfilteredPageSQL = `WITH page AS (
-    SELECT ref,max(position) AS position FROM chezhi_cards
-    GROUP BY ref ORDER BY max(position) DESC LIMIT 20 OFFSET $1
+// Share the exact grouped order keys between count and page. A single
+// sentinel row carries the count for an empty database. Clamp the requested
+// page before OFFSET, retaining last-card position ordering.
+const ordersUnfilteredPageSQL = `WITH keys AS MATERIALIZED (
+    SELECT ref,max(position) AS position FROM chezhi_cards GROUP BY ref
+), totals AS (
+    SELECT count(*) AS n FROM keys
+), page AS (
+    SELECT ref,position FROM keys ORDER BY position DESC LIMIT 20
+    OFFSET (SELECT (least($1::bigint,greatest(1,(n+19)/20))-1)*20 FROM totals)
+), details AS (
+    SELECT p.position,o.ref,o.channel,o.created,o.days,q.cards,q.activated,q.revoked,q.cards::numeric*o.cents AS cents
+    FROM page p JOIN chezhi_orders o USING(ref) CROSS JOIN LATERAL (
+        SELECT count(*) AS cards,count(*) FILTER (WHERE c.activated IS NOT NULL) AS activated,
+            count(*) FILTER (WHERE c.revoked) AS revoked FROM chezhi_cards c WHERE c.ref=p.ref
+    ) q
 )
-SELECT o.ref,o.channel,o.created,o.days,q.cards,q.activated,q.revoked,q.cards::numeric*o.cents
-FROM page p JOIN chezhi_orders o USING(ref) CROSS JOIN LATERAL (
-    SELECT count(*) AS cards,count(*) FILTER (WHERE c.activated IS NOT NULL) AS activated,
-        count(*) FILTER (WHERE c.revoked) AS revoked FROM chezhi_cards c WHERE c.ref=p.ref
-) q ORDER BY p.position DESC`
+SELECT t.n,d.ref IS NOT NULL,coalesce(d.ref,''),coalesce(d.channel,''),coalesce(d.created::text,''),
+    coalesce(d.days,0),coalesce(d.cards,0),coalesce(d.activated,0),coalesce(d.revoked,0),coalesce(d.cents,0)
+FROM totals t LEFT JOIN details d ON true ORDER BY d.position DESC`
+
+func readUnfilteredOrdersPage(ctx context.Context, tx *sql.Tx, o *Operations, q url.Values) error {
+	requested, err := strconv.Atoi(q.Get("op"))
+	if err != nil || requested < 1 { requested = 1 }
+	rows, err := tx.QueryContext(ctx, ordersUnfilteredPageSQL, requested)
+	if err != nil { return errDatabase }
+	defer rows.Close()
+	seen := false
+	for rows.Next() {
+		var order OrderRow
+		var count int
+		var present bool
+		var created string
+		if rows.Scan(&count, &present, &order.Ref, &order.Channel, &created, &order.Days,
+			&order.Count, &order.Activated, &order.Revoked, &order.Cents) != nil { return errDatabase }
+		if seen && count != o.Count { return errDatabase }
+		seen, o.Count = true, count
+		if !present {
+			if count != 0 { return errDatabase }
+			continue
+		}
+		order.Created, err = parseSQLTime(created)
+		if err != nil { return err }
+		o.Orders = append(o.Orders, order)
+	}
+	if rows.Err() != nil || !seen { return errDatabase }
+	o.Page, o.Pages = pageNum(q.Get("op"), o.Count)
+	o.addLinks("orders")
+	return nil
+}
 
 func readOrdersPage(ctx context.Context, tx *sql.Tx, o *Operations, q url.Values) error {
+	if o.Channel == "" && o.Q == "" { return readUnfilteredOrdersPage(ctx, tx, o, q) }
 	args := []any{o.Channel, strings.ToLower(o.Q)}
 	if tx.QueryRowContext(ctx, "SELECT count(*) FROM chezhi_orders o"+orderFilterSQL+
 		" AND EXISTS (SELECT 1 FROM chezhi_cards c WHERE c.ref=o.ref)", args...).Scan(&o.Count) != nil {
 		return errDatabase
 	}
 	o.Page, o.Pages = pageNum(q.Get("op"), o.Count)
-	var rows *sql.Rows
-	var err error
-	if o.Channel == "" && o.Q == "" {
-		rows, err = tx.QueryContext(ctx, ordersUnfilteredPageSQL, (o.Page-1)*20)
-	} else {
-		rows, err = tx.QueryContext(ctx, ordersPageSQL, append(args, (o.Page-1)*20)...)
-	}
+	rows, err := tx.QueryContext(ctx, ordersPageSQL, append(args, (o.Page-1)*20)...)
 	if err != nil {
 		return errDatabase
 	}
