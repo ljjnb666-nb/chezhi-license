@@ -54,7 +54,61 @@ def capture_plans(sql, folder, label, baseline):
                     count(*) FILTER (WHERE c.revoked) AS revoked FROM chezhi_cards c WHERE c.ref=p.ref
             ) q ORDER BY p.position DESC"""
         queries = {
-            "overview-status": f"SELECT status,count(*) FROM (SELECT {status} AS status FROM chezhi_cards c) s GROUP BY status",
+            "overview-status": f"""SELECT count(*),
+                count(*) FILTER (WHERE c.revoked),
+                count(*) FILTER (WHERE NOT c.revoked AND c.expires<={now}::numeric),
+                count(*) FILTER (WHERE NOT c.revoked AND (c.expires<={now}::numeric) IS NOT TRUE AND c.activated IS NULL),
+                count(*) FILTER (WHERE NOT c.revoked AND (c.expires<={now}::numeric) IS NOT TRUE AND c.activated IS NOT NULL AND c.device=''),
+                count(*) FILTER (WHERE NOT c.revoked AND (c.expires<={now}::numeric) IS NOT TRUE AND c.activated IS NOT NULL AND c.device<>'')
+                FROM chezhi_cards c""",
+            "overview-combined": f"""WITH quantities AS (
+    SELECT c.ref,count(*) AS cards,
+        count(*) FILTER (WHERE c.revoked) AS revoked,
+        count(*) FILTER (WHERE NOT c.revoked AND c.expires<={now}::numeric) AS expired,
+        count(*) FILTER (WHERE NOT c.revoked AND c.activated IS NULL) AS unused,
+        count(*) FILTER (WHERE NOT c.revoked AND c.activated IS NOT NULL AND c.device='' AND (c.expires<={now}::numeric) IS NOT TRUE) AS unbound
+    FROM chezhi_cards c GROUP BY c.ref
+), sales AS (
+    SELECT CASE WHEN o.channel<>'test' AND o.created>={start}::numeric AND o.created<{end}::numeric
+        THEN floor((o.created-{start}::numeric)/86400)::int END AS day,
+        q.*,o.channel<>'test' AS paid,q.cards::numeric*o.cents AS cents
+    FROM quantities q JOIN chezhi_orders o USING(ref)
+)
+SELECT grouping(day),day,coalesce(sum(cards) FILTER (WHERE paid),0),
+    count(*) FILTER (WHERE paid),coalesce(sum(cents) FILTER (WHERE paid),0),
+    coalesce(sum(cards),0),coalesce(sum(revoked),0),coalesce(sum(expired),0),
+    coalesce(sum(unused),0),coalesce(sum(unbound),0)
+FROM sales GROUP BY GROUPING SETS ((day),())""",
+            "orders-unfiltered-combined": """WITH keys AS MATERIALIZED (
+    SELECT ref,max(position) AS position FROM chezhi_cards GROUP BY ref
+), totals AS (
+    SELECT count(*) AS n FROM keys
+), page AS (
+    SELECT ref,position FROM keys ORDER BY position DESC LIMIT 20
+    OFFSET (SELECT (least(5::bigint,greatest(1,(n+19)/20))-1)*20 FROM totals)
+), details AS (
+    SELECT p.position,o.ref,o.channel,o.created,o.days,q.cards,q.activated,q.revoked,q.cards::numeric*o.cents AS cents
+    FROM page p JOIN chezhi_orders o USING(ref) CROSS JOIN LATERAL (
+        SELECT count(*) AS cards,count(*) FILTER (WHERE c.activated IS NOT NULL) AS activated,
+            count(*) FILTER (WHERE c.revoked) AS revoked FROM chezhi_cards c WHERE c.ref=p.ref
+    ) q
+)
+SELECT t.n,d.ref IS NOT NULL,coalesce(d.ref,''),coalesce(d.channel,''),coalesce(d.created::text,''),
+    coalesce(d.days,0),coalesce(d.cards,0),coalesce(d.activated,0),coalesce(d.revoked,0),coalesce(d.cents,0)
+FROM totals t LEFT JOIN details d ON true ORDER BY d.position DESC""",
+            "orders-unfiltered-count": """SELECT count(*) FROM chezhi_orders o
+                WHERE (''='' OR o.channel='') AND (''='' OR strpos(lower(o.ref COLLATE "pg_c_utf8"),'')>0)
+                AND EXISTS (SELECT 1 FROM chezhi_cards c WHERE c.ref=o.ref)""",
+            "orders-unfiltered-page": """WITH page AS (
+                SELECT ref,max(position) AS position FROM chezhi_cards
+                GROUP BY ref ORDER BY max(position) DESC LIMIT 20 OFFSET 80
+                )
+                SELECT o.ref,o.channel,o.created,o.days,q.cards,q.activated,q.revoked,q.cards::numeric*o.cents
+                FROM page p JOIN chezhi_orders o USING(ref) CROSS JOIN LATERAL (
+                SELECT count(*) AS cards,count(*) FILTER (WHERE c.activated IS NOT NULL) AS activated,
+                count(*) FILTER (WHERE c.revoked) AS revoked FROM chezhi_cards c WHERE c.ref=p.ref
+                ) q ORDER BY p.position DESC""",
+            "orders-unfiltered-prior": page.replace(order_filter, "").format(offset=80),
             "overview-sales": f"""WITH quantities AS (SELECT ref,count(*) AS cards FROM chezhi_cards GROUP BY ref),
                 sales AS (SELECT CASE WHEN o.created>={start}::numeric AND o.created<{end}::numeric
                     THEN floor((o.created-{start}::numeric)/86400)::int END AS day,

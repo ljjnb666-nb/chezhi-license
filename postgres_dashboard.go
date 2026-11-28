@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -46,71 +47,55 @@ func (p *postgresStore) dashboardPage(ctx context.Context, v *View, q url.Values
 	})
 }
 
-const overviewStatusSQL = `SELECT status,count(*) FROM (
-    SELECT ` + cardStatusSQL + ` AS status FROM chezhi_cards c
-) s GROUP BY status`
-
-// Group quantities before joining orders. Both all-time totals and the trend
-// use that same set of paid orders, with no card-row DISTINCT or second join.
-const overviewSalesSQL = `WITH quantities AS (
-    SELECT ref,count(*) AS cards FROM chezhi_cards GROUP BY ref
+// Aggregate each card exactly once into its order. The FK ensures every
+// card belongs to an order. Status totals include test orders; revenue
+// and trend explicitly exclude them. GROUPING distinguishes total rows
+// from the NULL day bucket for orders outside the seven-day window.
+const overviewCombinedSQL = `WITH quantities AS (
+    SELECT c.ref,count(*) AS cards,
+        count(*) FILTER (WHERE c.revoked) AS revoked,
+        count(*) FILTER (WHERE NOT c.revoked AND c.expires<=$1::numeric) AS expired,
+        count(*) FILTER (WHERE NOT c.revoked AND c.activated IS NULL) AS unused,
+        count(*) FILTER (WHERE NOT c.revoked AND c.activated IS NOT NULL AND c.device='' AND (c.expires<=$1::numeric) IS NOT TRUE) AS unbound
+    FROM chezhi_cards c GROUP BY c.ref
 ), sales AS (
-    SELECT CASE WHEN o.created>=$1::numeric AND o.created<$2::numeric
-        THEN floor((o.created-$1::numeric)/86400)::int END AS day,
-        q.cards,q.cards::numeric*o.cents AS cents
-    FROM quantities q JOIN chezhi_orders o USING(ref) WHERE o.channel<>'test'
+    SELECT CASE WHEN o.channel<>'test' AND o.created>=$2::numeric AND o.created<$3::numeric
+        THEN floor((o.created-$2::numeric)/86400)::int END AS day,
+        q.*,o.channel<>'test' AS paid,q.cards::numeric*o.cents AS cents
+    FROM quantities q JOIN chezhi_orders o USING(ref)
 )
-SELECT grouping(day),day,coalesce(sum(cards),0),count(*),coalesce(sum(cents),0)
+SELECT grouping(day),day,coalesce(sum(cards) FILTER (WHERE paid),0),
+    count(*) FILTER (WHERE paid),coalesce(sum(cents) FILTER (WHERE paid),0),
+    coalesce(sum(cards),0),coalesce(sum(revoked),0),coalesce(sum(expired),0),
+    coalesce(sum(unused),0),coalesce(sum(unbound),0)
 FROM sales GROUP BY GROUPING SETS ((day),())`
 
 func readOverview(ctx context.Context, tx *sql.Tx, now time.Time, d *Dashboard, o *Operations) error {
-	rows, err := tx.QueryContext(ctx, overviewStatusSQL, sqlTime(now))
-	if err != nil {
-		return errDatabase
-	}
-	for rows.Next() {
-		var status string
-		var count int
-		if rows.Scan(&status, &count) != nil {
-			rows.Close()
-			return errDatabase
-		}
-		d.Stats.Total += count
-		switch status {
-		case "已激活":
-			d.Stats.Active = count
-		case "未激活":
-			d.Stats.Unused = count
-		case "已过期":
-			d.Stats.Expired = count
-		case "已吊销":
-			d.Stats.Revoked = count
-		case "已解绑":
-			d.Stats.Unbound = count
-		}
-	}
-	rows.Close()
-	if rows.Err() != nil {
-		return errDatabase
-	}
-
 	t := now.In(beijing)
 	midnight := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, beijing)
 	o.Trend = emptyTrend(now)
-	rows, err = tx.QueryContext(ctx, overviewSalesSQL, sqlTime(midnight.AddDate(0, 0, -6)), sqlTime(midnight.AddDate(0, 0, 1)))
+	rows, err := tx.QueryContext(ctx, overviewCombinedSQL, sqlTime(now),
+		sqlTime(midnight.AddDate(0, 0, -6)), sqlTime(midnight.AddDate(0, 0, 1)))
 	if err != nil {
 		return errDatabase
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var summary, cards, orders int
+		var summary, cards, orders, total, revoked, expired, unused, unbound int
 		var day sql.NullInt32
 		var cents int64
-		if rows.Scan(&summary, &day, &cards, &orders, &cents) != nil {
+		if rows.Scan(&summary, &day, &cards, &orders, &cents, &total, &revoked,
+			&expired, &unused, &unbound) != nil {
 			return errDatabase
 		}
 		if summary == 1 {
 			d.Stats.Orders, d.Stats.ManualCents = orders, cents
+			d.Stats.Total, d.Stats.Revoked, d.Stats.Expired = total, revoked, expired
+			// The schema guarantees unactivated cards have NULL expiry.
+			// The five status buckets are disjoint and exhaustive.
+			if revoked+expired+unused+unbound > total { return errDatabase }
+			d.Stats.Unused, d.Stats.Unbound = unused, unbound
+			d.Stats.Active = total - revoked - expired - unused - unbound
 			continue
 		}
 		if day.Valid {
@@ -180,7 +165,59 @@ FROM page p CROSS JOIN LATERAL (
         count(*) FILTER (WHERE c.revoked) AS revoked FROM chezhi_cards c WHERE c.ref=p.ref
 ) q ORDER BY p.position DESC`
 
+// Share the exact grouped order keys between count and page. A single
+// sentinel row carries the count for an empty database. Clamp the requested
+// page before OFFSET, retaining last-card position ordering.
+const ordersUnfilteredPageSQL = `WITH keys AS MATERIALIZED (
+    SELECT ref,max(position) AS position FROM chezhi_cards GROUP BY ref
+), totals AS (
+    SELECT count(*) AS n FROM keys
+), page AS (
+    SELECT ref,position FROM keys ORDER BY position DESC LIMIT 20
+    OFFSET (SELECT (least($1::bigint,greatest(1,(n+19)/20))-1)*20 FROM totals)
+), details AS (
+    SELECT p.position,o.ref,o.channel,o.created,o.days,q.cards,q.activated,q.revoked,q.cards::numeric*o.cents AS cents
+    FROM page p JOIN chezhi_orders o USING(ref) CROSS JOIN LATERAL (
+        SELECT count(*) AS cards,count(*) FILTER (WHERE c.activated IS NOT NULL) AS activated,
+            count(*) FILTER (WHERE c.revoked) AS revoked FROM chezhi_cards c WHERE c.ref=p.ref
+    ) q
+)
+SELECT t.n,d.ref IS NOT NULL,coalesce(d.ref,''),coalesce(d.channel,''),coalesce(d.created::text,''),
+    coalesce(d.days,0),coalesce(d.cards,0),coalesce(d.activated,0),coalesce(d.revoked,0),coalesce(d.cents,0)
+FROM totals t LEFT JOIN details d ON true ORDER BY d.position DESC`
+
+func readUnfilteredOrdersPage(ctx context.Context, tx *sql.Tx, o *Operations, q url.Values) error {
+	requested, err := strconv.Atoi(q.Get("op"))
+	if err != nil || requested < 1 { requested = 1 }
+	rows, err := tx.QueryContext(ctx, ordersUnfilteredPageSQL, requested)
+	if err != nil { return errDatabase }
+	defer rows.Close()
+	seen := false
+	for rows.Next() {
+		var order OrderRow
+		var count int
+		var present bool
+		var created string
+		if rows.Scan(&count, &present, &order.Ref, &order.Channel, &created, &order.Days,
+			&order.Count, &order.Activated, &order.Revoked, &order.Cents) != nil { return errDatabase }
+		if seen && count != o.Count { return errDatabase }
+		seen, o.Count = true, count
+		if !present {
+			if count != 0 { return errDatabase }
+			continue
+		}
+		order.Created, err = parseSQLTime(created)
+		if err != nil { return err }
+		o.Orders = append(o.Orders, order)
+	}
+	if rows.Err() != nil || !seen { return errDatabase }
+	o.Page, o.Pages = pageNum(q.Get("op"), o.Count)
+	o.addLinks("orders")
+	return nil
+}
+
 func readOrdersPage(ctx context.Context, tx *sql.Tx, o *Operations, q url.Values) error {
+	if o.Channel == "" && o.Q == "" { return readUnfilteredOrdersPage(ctx, tx, o, q) }
 	args := []any{o.Channel, strings.ToLower(o.Q)}
 	if tx.QueryRowContext(ctx, "SELECT count(*) FROM chezhi_orders o"+orderFilterSQL+
 		" AND EXISTS (SELECT 1 FROM chezhi_cards c WHERE c.ref=o.ref)", args...).Scan(&o.Count) != nil {
@@ -188,7 +225,6 @@ func readOrdersPage(ctx context.Context, tx *sql.Tx, o *Operations, q url.Values
 	}
 	o.Page, o.Pages = pageNum(q.Get("op"), o.Count)
 	rows, err := tx.QueryContext(ctx, ordersPageSQL, append(args, (o.Page-1)*20)...)
-
 	if err != nil {
 		return errDatabase
 	}

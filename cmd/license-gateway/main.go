@@ -46,6 +46,7 @@ type gateway struct {
 	upstream *url.URL
 	client *http.Client
 	slots chan struct{}
+	budget *requestBudget
 }
 
 func newGateway(host, target string, roots *x509.CertPool) (*gateway, error) {
@@ -62,13 +63,13 @@ func newGateway(host, target string, roots *x509.CertPool) (*gateway, error) {
 		TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots, ServerName: "127.0.0.1"},
 		TLSHandshakeTimeout: 3*time.Second,
 		ResponseHeaderTimeout: 8*time.Second,
-		MaxConnsPerHost: 8, MaxIdleConnsPerHost: 4, IdleConnTimeout: 30*time.Second,
+		MaxConnsPerHost: 2, MaxIdleConnsPerHost: 2, IdleConnTimeout: 30*time.Second,
 		DisableCompression: true,
 	}
 	return &gateway{host:host, upstream:u, client:&http.Client{
 		Transport:t, Timeout:12*time.Second,
 		CheckRedirect:func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-	}, slots:make(chan struct{},8)}, nil
+	}, slots:make(chan struct{},2), budget:newBudget(time.Now())}, nil
 }
 
 func reject(w http.ResponseWriter, status int, code string) {
@@ -147,12 +148,20 @@ func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		w.Header().Set("Retry-After","1"); reject(w,503,"busy"); return
 	}
-	r.Body = http.MaxBytesReader(w,r.Body,maxBody)
+	// Preserve net/http's native oversized-body handling when metrics wrap
+	// the writer, rather than hiding the original server response.
+	bodyWriter:=w
+	if measured,ok:=w.(*measuredResponse);ok {bodyWriter=measured.ResponseWriter}
+	r.Body = http.MaxBytesReader(bodyWriter,r.Body,maxBody)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		var tooLarge *http.MaxBytesError
 		if errors.As(err,&tooLarge) { reject(w,413,"body_too_large") } else { reject(w,400,"invalid_input") }
 		return
+	}
+	// Count every attempted upstream request, even if the origin is down.
+	if ok,retry:=g.budget.allow(time.Now()); !ok {
+		w.Header().Set("Retry-After",strconv.Itoa(retry)); reject(w,429,"rate_limited"); return
 	}
 	// Construct a fresh request; never forward caller headers, source IP,
 	// cookies, proxy metadata, auth or an arbitrary destination.
@@ -220,7 +229,8 @@ func (l *limitedListener) Close() error {
 }
 
 func run() error {
-	if len(os.Args) != 1 { return errors.New("no command arguments; configure reviewed local environment") }
+	checkTLS:=len(os.Args)==2 && os.Args[1]=="tls-status"
+	if len(os.Args)!=1 && !checkTLS { return errors.New("only tls-status is supported; configure reviewed local environment") }
 	ca, err := os.ReadFile(os.Getenv("CHEZHI_GATEWAY_ORIGIN_CA"))
 	if err != nil { return errors.New("cannot read origin CA") }
 	roots := x509.NewCertPool()
@@ -231,12 +241,16 @@ func run() error {
 	if err != nil { return errors.New("cannot load gateway TLS certificate") }
 	leaf, err := x509.ParseCertificate(pair.Certificate[0])
 	if err != nil || leaf.VerifyHostname("127.0.0.1") != nil || time.Now().Before(leaf.NotBefore) || time.Now().After(leaf.NotAfter) { return errors.New("gateway certificate must cover 127.0.0.1 and be current") }
+	if checkTLS { return tlsStatus(g.upstream.Host,roots,leaf) }
 	l, err := net.Listen("tcp",listen)
 	if err != nil { return errors.New("cannot open gateway loopback listener") }
 	defer l.Close()
-	srv := &http.Server{Handler:g, TLSConfig:&tls.Config{MinVersion:tls.VersionTLS12, Certificates:[]tls.Certificate{pair}}, ReadHeaderTimeout:3*time.Second, ReadTimeout:8*time.Second, WriteTimeout:18*time.Second, IdleTimeout:15*time.Second, MaxHeaderBytes:8192, ErrorLog:log.New(io.Discard,"",0)}
+	metrics:=&gatewayMetrics{}
+	srv := &http.Server{Handler:metrics.wrap(g), TLSConfig:&tls.Config{MinVersion:tls.VersionTLS12, Certificates:[]tls.Certificate{pair}}, ReadHeaderTimeout:3*time.Second, ReadTimeout:8*time.Second, WriteTimeout:18*time.Second, IdleTimeout:15*time.Second, MaxHeaderBytes:8192, ErrorLog:log.New(io.Discard,"",0)}
 	ctx, stop := signal.NotifyContext(context.Background(),os.Interrupt,syscall.SIGTERM)
 	defer stop()
+	go metrics.monitor(ctx,log.Default(),time.Minute)
+	go monitorTLS(ctx,log.Default(),15*time.Minute,g.upstream.Host,roots,leaf)
 	errs := make(chan error,1)
 	go func(){ errs <- srv.ServeTLS(&limitedListener{Listener:l,slots:make(chan struct{},32),done:make(chan struct{})},"","") }()
 	log.Print("local license gateway started")
@@ -244,7 +258,9 @@ func run() error {
 	case err := <-errs: return err
 	case <-ctx.Done():
 		c,cancel := context.WithTimeout(context.Background(),20*time.Second); defer cancel()
-		return srv.Shutdown(c)
+		err:=srv.Shutdown(c)
+		metrics.report(log.Default())
+		return err
 	}
 }
 

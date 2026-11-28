@@ -45,14 +45,26 @@ func TestPostgresServerProjectionParity(t *testing.T) {
 	if result, err := s.validate(keys[0], "active-device"); err != nil || !result.Valid {
 		t.Fatal(err)
 	}
-	if _, err := s.issue(0, 3, 600, "test", "Exclude-Trend"); err != nil {
+	permanent, err := s.issue(0, 3, 600, "test", "Exclude-Trend")
+	if err != nil {
 		t.Fatal(err)
 	}
+	if result, err := s.validate(permanent[0], "permanent-device"); err != nil || !result.Valid {
+		t.Fatal("permanent activation fixture", err)
+	}
+	// Paid orders outside the seven-day trend must remain in lifetime totals.
+	clock = now.Add(-9 * 24 * time.Hour)
+	if _, err := s.issue(30, 2, 75, "wechat", "Outside-Trend"); err != nil {
+		t.Fatal(err)
+	}
+	clock = now
 	state := pgSnapshot(t, s)
+	// A legal order row without cards must not enter counts or pagination.
+	pgExec(t, s, "INSERT INTO chezhi_orders(ref,channel,cents,days,created) VALUES ('empty-order','wechat',10,30,$1)", sqlTime(now))
 	for _, test := range []struct{ section, raw string }{
 		{"overview", ""}, {"cards", "q=cASE&channel=wechat&page=2"},
 		{"cards", "status=已过期"}, {"cards", "status=已解绑"}, {"cards", "status=已吊销"},
-		{"orders", "oc=wechat&oq=cASE"}, {"orders", "op=99"},
+		{"orders", "oc=wechat&oq=cASE"}, {"orders", "op=99"}, {"orders", ""}, {"orders", "oc=wechat"},
 		{"devices", "ds=已吊销"}, {"devices", "ds=已激活"}, {"devices", "ds=已过期"},
 		{"audit", "ap=2"}, {"settings", ""}, {"issue", ""}, {"plans", ""},
 	} {
@@ -101,6 +113,62 @@ func TestPostgresServerProjectionParity(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestPostgresOverviewEmptyAndTestOnly(t *testing.T) {
+	s, _ := postgresFixture(t)
+	pgInitialize(t, s)
+	now := time.Date(2026, 11, 28, 16, 0, 0, 0, time.UTC)
+	s.now = func() time.Time { return now }
+	check := func() {
+		t.Helper()
+		state := pgSnapshot(t, s)
+		v := View{Section: "overview", Now: now}
+		q := url.Values{}
+		if err := s.pg.dashboardPage(context.Background(), &v, q); err != nil {
+			t.Fatal(err)
+		}
+		want := buildDashboard(state, now, q)
+		ops := buildOperations(state, now, "overview", q)
+		if v.Dashboard.Stats != want.Stats || !reflect.DeepEqual(v.Operations.Trend, ops.Trend) {
+			t.Fatalf("overview empty/test-only parity failed: got=%+v want=%+v", v.Dashboard.Stats, want.Stats)
+		}
+	}
+	check()
+	keys, err := s.issue(0, 2, 600, "test", "Test-Only")
+	if err != nil { t.Fatal(err) }
+	if result, err := s.validate(keys[0], "fixture-device"); err != nil || !result.Valid {
+		t.Fatal("test-only activation failed", err)
+	}
+	check()
+}
+
+func TestPostgresUnfilteredOrderCountAndPage(t *testing.T) {
+	s, _ := postgresFixture(t)
+	pgInitialize(t, s)
+	now := time.Date(2026, 11, 28, 16, 0, 0, 0, time.UTC)
+	s.now = func() time.Time { return now }
+	check := func() {
+		t.Helper()
+		state := pgSnapshot(t, s)
+		for _, raw := range []string{"", "1", "2", "3", "99", "0", "-1", "invalid", "9999999999999999999999999999999"} {
+			q := url.Values{"op": {raw}}
+			v := View{Section:"orders", Now:now}
+			if err := s.pg.dashboardPage(context.Background(), &v, q); err != nil { t.Fatal(raw,err) }
+			want := buildOperations(state, now, "orders", q)
+			got := v.Operations
+			if got.Count != want.Count || got.Page != want.Page || got.Pages != want.Pages ||
+				got.Prev != want.Prev || got.Next != want.Next || !reflect.DeepEqual(got.Orders,want.Orders) {
+				t.Fatalf("order page parity failed op=%q got count/page/pages=%d/%d/%d want=%d/%d/%d",raw,got.Count,got.Page,got.Pages,want.Count,want.Page,want.Pages)
+			}
+		}
+	}
+	check()
+	for i:=0;i<23;i++ {
+		if _,err:=s.issue(30,1,100,"wechat",fmt.Sprintf("page-fixture-%02d",i)); err!=nil {t.Fatal(err)}
+	}
+	pgExec(t,s,"INSERT INTO chezhi_orders(ref,channel,cents,days,created) VALUES ('page-empty-order','wechat',10,30,$1)",sqlTime(now))
+	check()
 }
 
 func TestPostgresServerDashboardScale(t *testing.T) {

@@ -2,7 +2,7 @@ name: CheZhi License CI
 
 on:
   pull_request:
-    branches: [main, feature/p6-termux-staging]
+    branches: [main, feature/p6-termux-staging, feature/m5-m6-local-api-gateway]
   push:
     branches: [main]
   workflow_dispatch:
@@ -391,11 +391,13 @@ jobs:
           CHEZHI_TEST_POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
           CHEZHI_TEST_CONTAINER_IMAGE: chezhi-server:ci
           CHEZHI_TEST_GATEWAY_BINARY: ./bin/chezhi-gateway
+          CHEZHI_TEST_GATEWAY_PACED: '1'
           CHEZHI_TEST_CADDY_IMAGE: caddy:2.11.4-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
         run: |
           set -euo pipefail
           python3 migration/server_acceptance.py ./bin/chezhi-server | tee bin/standalone-acceptance.txt
           grep -F 'PASS GATEWAY_REAL_V2' bin/standalone-acceptance.txt
+          grep -F 'PASS GATEWAY_PACED' bin/standalone-acceptance.txt
       - if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -452,19 +454,39 @@ jobs:
           ENFORCE_TARGET: ${{ inputs.enforce_dashboard_slo }}
         run: |
           set -euo pipefail
-          CHEZHI_AUDITED_BASELINE=1 python3 migration/server_acceptance.py ./bin/performance/audited | tee bin/performance/audited.txt
+          baseline_status=0
+          CHEZHI_AUDITED_BASELINE=1 python3 migration/server_acceptance.py ./bin/performance/audited | tee bin/performance/audited.txt || baseline_status=$?
           enforce=0
           if [ "$ENFORCE_TARGET" = true ]; then enforce=1; fi
-          CHEZHI_REQUIRE_PERF="$enforce" python3 migration/server_acceptance.py ./bin/performance/optimized | tee bin/performance/optimized.txt
-          echo "### HTTPS 500 ms target (median of three trial P95s)" >> "$GITHUB_STEP_SUMMARY"
-          grep -E '^(SLO|PERFORMANCE_500MS_TARGET)' bin/performance/optimized.txt >> "$GITHUB_STEP_SUMMARY"
+          candidate_status=0
+          CHEZHI_REQUIRE_PERF="$enforce" CHEZHI_REQUIRE_CAPACITY=1 python3 migration/server_acceptance.py ./bin/performance/optimized | tee bin/performance/optimized.txt || candidate_status=$?
+          repeat_status=0
+          # Fresh disposable database and processes; run again even after a failure.
+          CHEZHI_REQUIRE_CAPACITY=1 CHEZHI_PLAN_DIR=bin/performance/plans/repeat python3 migration/server_acceptance.py ./bin/performance/optimized | tee bin/performance/optimized-repeat.txt || repeat_status=$?
+          {
+            echo "### HTTPS 500 ms target (median of three trial P95s)"
+            echo "Baseline exit: $baseline_status; candidate exit: $candidate_status; repeat exit: $repeat_status"
+            grep -E '^(SLO|PERFORMANCE_500MS_TARGET)' bin/performance/audited.txt || true
+            for profile in optimized optimized-repeat; do
+              echo "### $profile"
+              grep -E '^(SLO|PERFORMANCE_500MS_TARGET|CAPACITY_)' "bin/performance/$profile.txt" || true
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+          # Collect both independent profiles, but never suppress a failure.
+          test "$baseline_status" -eq 0
+          test "$candidate_status" -eq 0
+          test "$repeat_status" -eq 0
+          for profile in optimized optimized-repeat; do
+            grep -q '^PERFORMANCE_500MS_TARGET PASS ' "bin/performance/$profile.txt"
+            grep -q '^CAPACITY_GATE PASS ' "bin/performance/$profile.txt"
+          done
       - if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: dashboard-benchmark
           path: |
             bin/performance/*.txt
-            bin/performance/plans/*.json
+            bin/performance/plans/**/*.json
           retention-days: 14
           if-no-files-found: warn
 
@@ -551,6 +573,21 @@ jobs:
           go test -race -run '^TestPostgres' -count=1 -v ./... | tee bin/pg18-test.txt
           CGO_ENABLED=0 go build -trimpath -o bin/chezhi-license .
           python3 migration/postgres_acceptance.py ./bin/chezhi-license | tee bin/pg18-acceptance.txt
+      - name: Native log rotation on a separate disposable PostgreSQL 18 cluster
+        run: |
+          set -euo pipefail
+          bash -n migration/termux/test-postgres-logging.sh
+          timeout 150s bash migration/termux/test-postgres-logging.sh | tee bin/pg18-log-rotation.txt
+      - name: Authenticated encrypted archive and disposable PostgreSQL 18 restore
+        run: |
+          set -euo pipefail
+          if ! command -v age >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends age
+          fi
+          age --version
+          for script in migration/termux/encrypted-{export,receive}.sh migration/termux/test-encrypted-backup.sh; do bash -n "$script"; done
+          timeout 180s bash migration/termux/test-encrypted-backup.sh | tee bin/pg18-encrypted-backup.txt
       - if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -571,6 +608,22 @@ jobs:
         with:
           go-version: '1.26.11'
           cache: false
+      - name: Isolated loopback TLS trust transition and rollback
+        run: |
+          set -euo pipefail
+          bash -n migration/termux/stage-loopback-tls.sh
+          bash -n migration/termux/test-tls-rotation.sh
+          timeout 60s bash migration/termux/test-tls-rotation.sh
+      - name: Independent gateway runit and log rotation fixture
+        run: |
+          set -euo pipefail
+          if ! command -v runsv >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends runit
+          fi
+          bash -n migration/termux/gateway-service.sh
+          bash -n migration/termux/test-gateway-service.sh
+          timeout 120s bash migration/termux/test-gateway-service.sh
       - name: Loopback TLS isolation and cross-build
         run: |
           set -euo pipefail
@@ -580,9 +633,16 @@ jobs:
           CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build -trimpath -o bin/local-license-gateway/chezhi-gateway-android-arm64 ./cmd/license-gateway
           readelf -h bin/local-license-gateway/chezhi-gateway-android-arm64 | grep -E 'Machine:.*AArch64'
           git rev-parse HEAD > bin/local-license-gateway/source-commit.txt
-          cp migration/termux/GATEWAY.md migration/termux/cloudflared.disabled.yml bin/local-license-gateway/
+          cp migration/termux/GATEWAY.md migration/termux/cloudflared.disabled.yml migration/termux/gateway-service.sh migration/termux/maintenance-preflight.sh migration/termux/postgres-logging.candidate.conf migration/termux/encrypted-export.sh migration/termux/encrypted-receive.sh migration/termux/stage-loopback-tls.sh bin/local-license-gateway/
           printf '%s\n' 'UNSIGNED LOCAL TEST ONLY; NO TUNNEL OR PUBLIC DEPLOYMENT' > bin/local-license-gateway/NOTICE
-          (cd bin/local-license-gateway && sha256sum chezhi-gateway-android-arm64 source-commit.txt GATEWAY.md cloudflared.disabled.yml NOTICE > SHA256SUMS && sha256sum -c SHA256SUMS)
+          (cd bin/local-license-gateway && sha256sum chezhi-gateway-android-arm64 source-commit.txt GATEWAY.md cloudflared.disabled.yml gateway-service.sh NOTICE maintenance-preflight.sh postgres-logging.candidate.conf encrypted-export.sh encrypted-receive.sh stage-loopback-tls.sh > SHA256SUMS && sha256sum -c SHA256SUMS)
+      - name: Exact maintenance package integrity and negative cases
+        run: |
+          set -euo pipefail
+          python3 migration/termux/test-maintenance-zip.py
+          python3 -m zipfile -c bin/local-maintenance.zip bin/local-license-gateway/*
+          digest="$(sha256sum bin/local-maintenance.zip | cut -d ' ' -f1)"
+          python3 migration/termux/verify-maintenance-zip.py bin/local-maintenance.zip "$digest" "$(git rev-parse HEAD)"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: local-license-gateway-android-arm64-unsigned

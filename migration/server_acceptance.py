@@ -410,10 +410,16 @@ def measure_dashboard_http(a,b,cookie,sql,diagnostics):
     iterations=4 if benchmark else 1
     warmups=2 if benchmark else 0
     slo_pass=True
+    strict=os.getenv("CHEZHI_REQUIRE_CAPACITY")=="1"
+    assert not strict or (benchmark and not audited), "capacity gate requires candidate benchmark"
+    capacity_failures=[]
     def stats(client):
         code,_,body=client.request("/metrics")
         assert code==200
-        return {key:int(value) for key,value in re.findall(r"^(chezhi_db_[a-z_]+) (\d+)$",body,re.M)}
+        values={key:int(value) for key,value in re.findall(r"^(chezhi_db_[a-z_]+) (\d+)$",body,re.M)}
+        for group,value in re.findall(r'^chezhi_admission_rejected_total\{group="([a-z_]+)"\} (\d+)$',body,re.M):
+            values["admission_"+group]=int(value)
+        return values
     def perc(values,percent):
         values=sorted(values)
         return values[(percent*len(values)+99)//100-1]
@@ -498,6 +504,7 @@ def measure_dashboard_http(a,b,cookie,sql,diagnostics):
 
         if benchmark:
             csrf=a.csrf("/?view=issue",cookie)
+            mixed_before=[stats(diag) for diag in diagnostics]
             started,sampled,finished=Event(),Event(),Event()
             lock_samples=[]
             def observe():
@@ -521,6 +528,7 @@ def measure_dashboard_http(a,b,cookie,sql,diagnostics):
                         return outcomes
                     assert status in (429,503),status
                     time.sleep(0.025)
+                print(f"MIXED_ISSUE_EXHAUSTED cards={amount} issue_responses={dict(outcomes)}",flush=True)
                 raise AssertionError("mixed benchmark could not issue a card")
 
             with ThreadPoolExecutor(18) as pool:
@@ -533,13 +541,30 @@ def measure_dashboard_http(a,b,cookie,sql,diagnostics):
                     writes=work.result()
                 finally:
                     finished.set()
-                observed.result()
+                    observed.result()
+                    mixed_after=[stats(diag) for diag in diagnostics]
+                    for index,(old,new) in enumerate(zip(mixed_before,mixed_after)):
+                        delta={key:new[key]-old[key] for key in new if key.startswith("admission_") and key in old}
+                        print(f"MIXED_ADMISSION cards={amount} instance={index+1} counters={delta or 'not available in historical baseline'}",flush=True)
             assert sampled.is_set()
             status=Counter(event[1] for event in mixed)
             print(f"MIXED cards={amount} reads={len(mixed)} responses={dict(status)} "
                   f"error_rate={(len(mixed)-status[200])/len(mixed):.4f} http_503={status[503]} http_429={status[429]} "
                   f"issue_responses={dict(writes)} activations=1 lock_samples={len(lock_samples)} "
                   f"lock_waiters_peak={max(lock_samples,default=0)}",flush=True)
+            if strict:
+                before_failures=len(capacity_failures)
+                if len(mixed)!=320 or status!=Counter({200:320}) or writes!=Counter({200:1}):
+                    capacity_failures.append(f"mixed cards={amount}: read or first issuance failure")
+                required={"admission_admin_shared","admission_admin_issue","admission_public","admission_export"}
+                for index,(old,new) in enumerate(zip(mixed_before,mixed_after)):
+                    if not required.issubset(old) or not required.issubset(new):
+                        capacity_failures.append(f"mixed cards={amount} instance={index+1}: missing admission counters")
+                    elif any(new[key]!=old[key] for key in required):
+                        capacity_failures.append(f"mixed cards={amount} instance={index+1}: admission rejection or reset")
+                if len(mixed_before)!=2 or len(mixed_after)!=2:
+                    capacity_failures.append(f"mixed cards={amount}: expected two instances")
+                print(f"CAPACITY_MIXED cards={amount} passed={len(capacity_failures)==before_failures}",flush=True)
             for name in paths:
                 ok=[event[2] for event in mixed if event[0]==name and event[1]==200]
                 print(f"MIXED_LATENCY cards={amount} section={name} samples={len(ok)} "
@@ -551,6 +576,11 @@ def measure_dashboard_http(a,b,cookie,sql,diagnostics):
         if plan_dir and amount==100_000:
             capture_plans(sql,plan_dir,"audited" if audited else "optimized",audited)
     print(f"PERFORMANCE_500MS_TARGET {'PASS' if slo_pass else 'MISS'} trials={trials} samples_per_page_per_trial={16*iterations}",flush=True)
+    if strict:
+        if not slo_pass:
+            capacity_failures.append("repeated HTTPS P95 exceeded 500ms")
+        print(f"CAPACITY_GATE {'FAIL' if capacity_failures else 'PASS'} failures={capacity_failures}",flush=True)
+        assert not capacity_failures, capacity_failures
     if os.getenv("CHEZHI_REQUIRE_PERF")=="1":
         assert benchmark and slo_pass,"repeated HTTPS P95 did not meet the 500 ms target"
     print("PASS HTTPS dashboard functional checks under both synthetic data sizes",flush=True)
