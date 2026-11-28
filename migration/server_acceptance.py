@@ -400,6 +400,57 @@ def verify_secure_restore(binary,a,b,pg,sql,cli,migration_env,runtime_env,grants
         run(["docker","exec",os.environ["CHEZHI_TEST_POSTGRES_CONTAINER"],"rm","-f",dump])
 
 
+def benchmark_cpu_sample():
+    """Optional Linux counters; no subprocess, sampling thread or query load.
+    Host CPU and pressure are host-wide; cgroup counters apply to this
+    harness's cgroup, which need not include the PostgreSQL container.
+    Missing counters must not be interpreted as zero or change the gate.
+    """
+    sample = {"harness_process_ns": time.process_time_ns(),
+              "wall_ns": time.monotonic_ns()}
+    try:
+        with open("/proc/stat", encoding="ascii") as source:
+            fields = source.readline().split()
+        if fields[0] == "cpu" and len(fields) >= 9:
+            ticks = [int(x) for x in fields[1:9]]
+            sample["host_total_ticks"] = sum(ticks)
+            sample["host_idle_ticks"] = ticks[3]
+            sample["host_iowait_ticks"] = ticks[4]
+            sample["host_steal_ticks"] = ticks[7]
+    except (OSError, ValueError, IndexError):
+        pass
+    for resource in ("cpu", "io", "memory"):
+        try:
+            with open("/proc/pressure/" + resource, encoding="ascii") as source:
+                for line in source:
+                    match = re.fullmatch(r"(some|full) .* total=([0-9]+)\s*", line)
+                    if match:
+                        sample["host_" + resource + "_" + match[1] + "_us"] = int(match[2])
+        except (OSError, ValueError):
+            pass
+    try:
+        # Resolve only the kernel-supplied cgroup v2 path within the mount.
+        with open("/proc/self/cgroup", encoding="ascii") as source:
+            groups = [line.strip().split(":", 2)[2] for line in source if line.startswith("0::")]
+        root = Path("/sys/fs/cgroup").resolve()
+        if len(groups) == 1:
+            group = (root / groups[0].lstrip("/")).resolve()
+            if group == root or root in group.parents:
+                with (group / "cpu.stat").open(encoding="ascii") as source:
+                    for line in source:
+                        key, value = line.split()
+                        if key in {"usage_usec", "nr_periods", "nr_throttled", "throttled_usec"}:
+                            sample["harness_cgroup_" + key] = int(value)
+    except (OSError, ValueError, IndexError):
+        pass
+    return sample
+
+
+def benchmark_cpu_delta(before, after):
+    return {key: after[key] - value for key, value in before.items()
+            if key in after and after[key] >= value}
+
+
 def measure_dashboard_http(a,b,cookie,sql,diagnostics):
     paths = dict(overview="/?view=overview", cards="/?view=cards&page=5", orders="/?view=orders&op=5",
                  devices="/?view=devices&op=5", audit="/?view=audit&ap=5")
@@ -481,7 +532,13 @@ def measure_dashboard_http(a,b,cookie,sql,diagnostics):
         trial_p95={name:[] for name in paths}
         combined={name:[] for name in paths}
         for trial in range(trials):
+            cpu_before = benchmark_cpu_sample() if benchmark else None
             events=load(iterations)
+            if benchmark:
+                cpu_after = benchmark_cpu_sample()
+                evidence = benchmark_cpu_delta(cpu_before, cpu_after)
+                print(f"BENCHMARK_RESOURCES cards={amount} trial={trial+1} "
+                      f"counters={json.dumps(evidence,sort_keys=True)}", flush=True)
             for name in paths:
                 selected=[x for x in events if x[0]==name]
                 statuses=Counter(x[1] for x in selected)

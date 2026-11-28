@@ -551,3 +551,433 @@ actual-query EXPLAIN capture alongside the previous separate
 order count/page samples. Materialization and aggregation may have
 memory or spill costs; new CI results are required before claiming
 a gain. No deployment, merge, external access or phone changes.
+
+### V2 controller lifecycle follow-up (separate candidate)
+
+The capacity-passing PR #10 head cf9324c remains frozen. This separate
+follow-up introduces a fresh ~/.chezhi-gateway-local-v2 controller;
+it does not migrate, edit or delete the V1 tree. Since both bind the
+same loopback port, any V1 tree blocks V2 start until an explicitly
+reviewed maintenance procedure archives it. Do not perform that
+procedure during device endurance.
+
+Foreground runsv is exec'd directly with the controller lease on
+FD 9, removing the intermediary flock parent. Generated run, finish
+and log scripts close FD 9. The gateway service acquires an independent
+FD 8 lifetime lease before exec. Start/stop decisions serialize with
+an operation lease; stop waits up to ten iterations for the native
+supervise FIFO then uses bounded sv exit and verifies controller and
+service leases are released. Unexpected held service lease without a
+controller is a HOLD, not a successful stop. No PID discovery, arbitrary
+kill, automatic orphan removal, restart of M4 or network exposure.
+The service lease is a cooperative same-UID guard, not a security
+boundary. No promise of recovery after SIGKILL of runsv itself, which
+can also leave an orphan log process. The existing controller package
+trust and manual deployment restrictions remain.
+
+The isolated Linux runit fixture now checks the actual foreground
+PID, controller/service lease lifetime, simulated held orphan service
+lease refusal, legacy tree refusal, duplicate stop serialization,
+stop during startup and no-controller direct run rejection, in addition
+to the existing restart/log rotation and integrity tests. The synthetic
+service is a sleep process; actual Android binary FD inheritance and
+Termux runit behavior require separate device validation. The new
+branch is not a deployment or a replacement for the frozen artifact.
+
+### Read-only PostgreSQL log retention advisory
+
+postgres-log-retention.py is included in the V2 maintenance package
+(13 entries, twelve payloads plus manifest). It requires Python 3
+on the device and exact private Termux ARM64 staging home. It reports
+legacy and native collector logical byte counts, free bytes, advisory
+128 MiB log budget and 1 GiB free-space warning, and counts/bytes of
+files beyond the newest seven with at least seven days of mtime age.
+The exact current stderr pointer is excluded even if old. A pointer
+change, absent pointer with existing collector directory, unexpected
+filename/type/mode/owner, hard link, future mtime or more than 10000
+entries produces HOLD. The legacy pg_ctl log is never eligible.
+No log contents or arbitrary filenames are printed. No files are
+deleted, truncated, moved or modified; no SQL, service restart or
+scheduled cleanup. The snapshot is advisory and can race concurrent
+writes/rotation; retry HOLD, never treat it as authorization to delete.
+A hard disk ceiling and safe archival/deletion remain outstanding,
+requiring reviewed maintenance and collector/controller coordination.
+The thresholds are provisional defaults, not measured phone capacity.
+CI tests the inventory on synthetic private fixtures and retains the
+separate real PG18 native rotation test. Frozen PR #10 package remains
+12 entries and must use its original verifier.
+The stacked PR workflow now covers its actual base branch and the
+dedicated maintenance push branch, which previously matched neither
+trigger. No production activation or phone change.
+
+### V2 concurrent stop budget correction
+
+CI 46131078774 (head f15a83e, checkout 15cd362) executed after the
+stacked workflow trigger correction: 12/13 passed. Both strict
+capacity profiles passed, as did PG18 native logging and encrypted
+synthetic restore. The gateway runit fixture reached duplicate start
+refusal and simulated orphan service refusal but failed concurrent
+stop with "Controller operation busy." The original 10s operation
+wait was shorter than a normal shutdown with the 10s finish delay.
+The subsequent successful stop is not evidence that both callers
+succeeded. Retention and ZIP verification steps were not reached.
+
+Stop now allows a bounded 75s operation-lock wait for a previous
+stop (up to 10s startup wait, 45s native exit, 10s controller release,
+and two 5s child lease checks). Start retains its 10s operation wait.
+The logger holds its own FD 6 lease; start and stop refuse a surviving
+logger without a controller, and successful stop requires both child
+leases to release. The fixture tests a synthetic surviving logger,
+actual svlogd lease ownership, both concurrent stop exit codes and
+all three post-stop lease releases. Test timeout is 180s. Read-only
+log inventory now has a separate earlier CI step, so lifecycle
+failure cannot hide that test. No PID scanning, automatic orphan
+termination or active log deletion. The actual Android descriptor
+inheritance and abrupt supervisor-death recovery remain unverified.
+No performance or phone changes; PR #10 remains frozen.
+
+### Lifecycle evidence and encrypted V2 recovery fixture
+
+CI 46131975333 (head eeb5137, checkout 51d6805) passed 12/13.
+Gateway job 140938968366 explicitly recorded concurrent stop
+first=0 second=0, real Linux runit lifecycle PASS, retention unit
+fixture OK and 13-entry ZIP verification. PG18 job 140938968246
+passed native rotation and the existing synthetic age restore.
+Both strict dashboard profiles failed the unchanged 500ms gate
+(100k overview 545.6/567.5ms); all four mixed phases passed.
+No dashboard runtime source changed relative to frozen PR #10.
+This does not establish the cause of latency variation and remains
+a release blocker; do not relax the strict gate or claim full CI.
+
+The standalone V2 suite now optionally encrypts the actual disposable
+V2 PostgreSQL logical dump and temporary signing key separately
+with age, copies ciphertext to a separate private receiver directory,
+checks independently retained ciphertext digests, rejects wrong
+identity and damaged ciphertext, and verifies the decrypted bytes.
+CI explicitly enables this path and requires V2_ENCRYPTED_RECOVERY.
+The restored database is populated only from received dump bytes
+and the server uses the recovered signing key path, not the original.
+The existing recovery security reset, changed deployment scope,
+old challenge rejection, preserved bindings, independent Ed25519
+renewal verification, revocation and legacy denial remain mandatory.
+An unrelated generated signing key must fail server startup.
+All material is synthetic and within the existing temporary fixture;
+no signing key, identity, plaintext dump or ciphertext is uploaded.
+No production backup tool, live key export, real remote transfer,
+separate physical host or fresh database cluster is implemented.
+The receiver is a directory on the same runner and the restored
+database is in the same disposable PG17 container; existing PG18
+encrypted fixture remains independent. Fresh roles/config/TLS
+reconstruction and real off-device disaster recovery are outstanding.
+No physical phone or public endpoint changes.
+
+### Independent PostgreSQL cluster recovery candidate
+
+CI 46132554816 (head ce99dcd, checkout e041120) passed the standalone
+V2_ENCRYPTED_RECOVERY gate with 0.862s verified recovery for the tiny
+synthetic same-cluster fixture; this is not a production RTO.
+The full workflow was 12/13: both strict capacity profiles still
+missed the 100k overview target (598.0/585.1ms), despite all four
+mixed phases passing. Keep the failure and the frozen PR #10.
+
+The follow-up extends the enabled synthetic standalone recovery
+to a separate fresh PG18 container with loopback-only dynamic
+host port, verifies different cluster identifier, major version
+and empty public schema before restoration. Restore the same
+verified decrypted dump bytes; create fresh bootstrap migrator
+and restricted runtime role credentials; apply the checked-in
+runtime grants. Generate fresh local TLS and CSRF inputs and build
+a minimal service environment with recovered signing key only.
+Require migrator/runtime checks, runtime recovery-command denial,
+pre-reset startup denial, overprivileged service startup denial,
+reset of old sessions/challenges, preserved card/order/binding
+and signing-history data, new scope with unchanged signing
+public key, old cookie/challenge rejection, fresh owner login,
+independently verified renewal, revocation and downgrade denial.
+Compare source business state before/after. Require both explicit
+independent recovery and source-unchanged markers in CI.
+The separate disposable cluster is removed in finally; the test
+uses the existing temporary receiver key and in-memory dump.
+The PG18 image is the existing compatibility tag, not a pinned
+release image. The bootstrap role is privileged; the application
+uses the restricted runtime role. Fixture role passwords are
+random and temporary, not production credentials. No real
+physical host transfer, production key backup, signed release,
+or actual phone restore; no changes to application SQL or
+capacity gates. New candidate remains pending CI.
+
+### Independent recovery history invariant correction
+
+CI 46133119043 (head 3d5fe77, checkout a159a85) passed 12/13.
+Both strict capacity profiles passed (100k overview 360.8/380.2ms,
+orders 230.3/218.0ms), with all four mixed phases passing. This
+does not erase prior capacity failures. Same-cluster encrypted
+V2 recovery passed again. Independent PG18 restore reached the
+post-reset equality assertion in v2_acceptance.py line 358.
+The previous test incorrectly included signing_history in the
+immutable tables: refreshSigningScope in signing_policy.go
+explicitly appends one recovery event when it creates a new scope.
+The failure log did not identify the individual table, so this is
+a source-supported test diagnosis, not proof that all other rows
+are unchanged. The new assertions report the table on a mismatch.
+
+Require exact immutable cards, bindings, orders, owner, members
+and plans; unchanged policy fields except the new deployment;
+all previous signing-history rows unchanged plus exactly one
+recovery event with original public key and new scope. Require
+all prior audit rows unchanged plus one security_recovered/admin
+event, cleared sessions/challenges/rate buckets and repeated
+reset refusal without extra history/audit events. CI requires
+V2_RECOVERY_HISTORY_APPEND_ONLY along with the existing independent
+cluster and source-unchanged markers. No runtime or security
+behavior changed. New tests await CI; no deployment or phone action.
+
+### Offline log archive candidate and independent recovery pass
+
+CI 46133768853 (head f272ec8, checkout 0e38df0) passed 13/13.
+Standalone job 140944473180 explicitly passed encrypted V2 recovery,
+append-only signing/audit history, independent PG18 recovery with
+fresh roles/TLS/CSRF, and source business state unchanged. The small
+synthetic second-cluster recovery took 6.177s; not a production RTO
+or physical host recovery. Both strict capacity profiles passed
+(100k overview 349.2/342.1ms, orders 212.0/190.1ms); all four
+mixed phases passed. Prior intermittent capacity misses remain
+recorded. Gateway lifecycle and 13-entry package checks passed.
+
+The default retention command remains read-only. The new explicit
+archive-offline mode requires a separate reviewed maintenance window,
+a stopped M4 controller and database, an intact private managed
+tree, controller/control/service exclusive leases, no postmaster.pid,
+and exact pg_ctl status exit 3. It does not stop or start anything.
+It refuses an absent/changed current collector pointer, protects the
+last recorded active log and newest seven logs, excludes the legacy
+log, and processes only eligible logs at least seven days old.
+It archives each candidate to a private SHA256-named gzip, never
+overwrites an archive, fsyncs the file and archive directory/parent,
+reads back and checks exact plaintext, rechecks stopped state and
+eligibility, source inode/metadata/content, then removes that source
+and fsyncs the log directory. A valid existing archive supports
+resuming an interrupted maintenance run; invalid archive denies
+cleanup. Limits: 16 MiB per file and 32 MiB source bytes per run,
+minimum 1 GiB free plus candidate size. An oversized oldest
+candidate stops the batch, not a reason to bypass safety.
+
+This is a cooperative offline mechanism, not protection from a
+same-UID actor or manual pg_ctl ignoring the managed locks.
+A local gzip is not encrypted, off-device disaster recovery or a
+hard disk quota; actual net space saved depends on compression.
+Archives require separately reviewed retention/transfer; no automatic
+pruning, boot entry, schedule, online cleanup or real-device action.
+If the collector pointer disappears on actual clean shutdown, the
+tool holds rather than guessing which log is safe. Directory fsync
+must succeed; Termux filesystem behavior and real stopped PG18
+maintenance remain unverified. CI exercises simulated stopped/active
+status, lock conflicts, PID marker, missing pointer, corrupt/valid
+existing archive, idempotent retry and protected source preservation.
+Do not run the destructive mode on the current endurance device.
+
+### Real PostgreSQL 18 offline archive gate
+
+CI 46134301166 (head 4c70d84, checkout e102cfb) passed 13/13,
+the second consecutive full passing candidate. Gateway job
+140946070130 passed two retention/archival fixture tests and
+the 13-entry ZIP. Standalone independent cluster recovery passed
+again (6.398s tiny synthetic fixture); both strict capacity
+profiles passed (100k overview 333.8/335.4ms, orders 211.6/207.5ms).
+Previous performance misses remain evidence of variability.
+
+The new PG18 fixture builds a disposable compatibility image
+with Python 3, runs as postgres with no network or published
+ports, initializes a private cluster, enables the native collector,
+creates a synthetic database sentinel and ten aged synthetic log
+files. Actual running PG must refuse archive. After actual clean
+pg_ctl stop, if current_logfiles persists, the real maintenance
+function must archive eligible files, verify gzip readback, leave
+every protected file unchanged and allow idempotent retry. If
+the native pointer is absent, explicit PG18_OFFLINE_POINTER_ABSENT_HOLD
+and unchanged files are mandatory; that outcome is not a cleanup
+PASS. In both cases restart must recover the sentinel. CI records
+distinct outcomes in pg18-offline-archive.txt and removes the test
+container on exit. No mock pg_ctl or production data.
+Image preparation uses the Alpine package mirror; runtime is isolated.
+The fixture ages synthetic log files, not actual historical phone data.
+
+Maintenance marker reads are now bounded nonblocking regular-file
+reads with no symlink following; FIFO marker refusal is tested.
+A verified reused archive also receives an inode fsync before
+unlinking source. No new runtime gateway or SQL changes, no
+scheduled cleanup, remote log transfer, archive encryption or hard
+disk cap. Actual Termux directory fsync and live phone maintenance
+are still unverified. Do not interrupt the endurance device.
+
+### Offline archive pass and local notification handoff candidate
+
+CI 46135249759 (head de2dfda, checkout f2a0ab1) passed 13/13,
+third consecutive full passing candidate. PG18 job 140950148539
+explicitly archived four eligible synthetic logs after real pg_ctl
+stop, preserved protected logs and verified restart sentinel.
+Both strict capacity profiles passed (100k overview 355.7/347.4ms,
+orders 229.0/219.9ms), all mixed phases passed. Independent recovery
+passed again (6.506s small synthetic fixture). No phone action.
+Prior intermittent capacity misses and physical verification gates
+remain recorded.
+
+Independent client admission is intentionally not implemented at
+the loopback gateway: remote peer is the local proxy, caller headers
+and claimed device/card IDs are not authenticated identities.
+Keep global gateway budget and authoritative origin quotas; do not
+trust forwarded headers or introduce a spoofable per-client map.
+An authorized external edge with verified identity and separately
+reviewed trust boundary is required for that remaining work.
+
+Local status export is opt-in through a pre-provisioned private
+absolute directory. A fresh V2 controller creates status/ mode
+0700 and sets CHEZHI_GATEWAY_STATUS_DIR. The monitoring goroutine
+publishes fixed schema v1 status.json (0600) at startup and one-minute
+cadence, via temporary file, fsync, rename and directory fsync.
+Only process timestamps, lifecycle OBSERVING/STOPPING, aggregate
+HTTP counters and two alert-open flags; no card, key, client address,
+headers, bodies or arbitrary log strings. No new HTTP route, tunnel,
+external notification or secret. Existing raw metric logs remain.
+Consumers must reject stale snapshots (e.g. > 180s old), future or
+invalid timestamps and unexpected versions, and treat STOPPING
+as not ready. OBSERVING is not readiness, HTTP200 is not proof of
+license validity, closed alert is not proof of recovery, counters
+are non-atomic samples and reset at restart. Shutdown snapshot is
+best effort, not proof of shutdown. Write failure emits a fixed
+local message; stale or absent file must not be interpreted as OK.
+Directory and ancestors must be private and controlled by operator;
+same-UID tampering is outside this boundary. Abrupt death may leave
+a temporary file; do not auto-delete unrelated files. POSIX tests
+cover modes, replacement, symlink refusal, alert flags and cancellation.
+Android filesystem and notification consumer/delivery still require
+validation. No existing installed controller is upgraded automatically.
+
+### Local observer candidate (M7)
+
+The rerun of CI 46136366621 on bd5a704 completed 13/13. The original
+audited baseline mixed issuance assertion failed; both candidate
+capacity profiles passed on both attempts. Rerun candidate 100k
+overview median trial P95: 378.0 / 370.7 ms. This does not establish
+sustained capacity or remove the original failure evidence.
+
+Source-only observer, not included in the signed/unsigned maintenance
+package yet; no installation or service integration. On a disposable
+private status directory, using Python 3.11+ on POSIX:
+
+    python3 migration/termux/gateway-status-observer.py --self-test
+    python3 migration/termux/gateway-status-observer.py --directory /absolute/private/status
+    python3 migration/termux/gateway-status-observer.py --directory /absolute/private/status --watch
+
+One-shot exit 0 means a fresh valid OBSERVING snapshot, not readiness
+or proof of license validity; exit 2 means missing, invalid, stale
+or STOPPING. Watch mode emits fixed local transition labels every
+30-second sample, not HTTP endpoints or external notifications.
+Deduplication and the timestamp high-water mark are in memory only.
+Unknown intervals and generation changes cannot produce a synthetic
+recovery notification. A closed alert flag is not proof of service
+recovery. A fresh snapshot cannot prove the publisher still lives;
+abrupt death may only be visible when the snapshot exceeds 180 s.
+Clock rollback may conservatively invalidate observations. Same-UID
+tampering and untrusted directory ancestors are outside the contract.
+No persistent delivery, restart deduplication or exact event replay.
+The consumer reads no credentials, sends no network requests and
+does not write to the producer directory. CI and Termux verification
+remain required before packaging or operational use.
+
+### Performance gate reopened (M7-D)
+
+CI 46137843044 on 7ca4c7f: 12/13 jobs passed, including five
+observer self-tests and the existing 13-entry local package verifier.
+The dashboard comparison job failed on the second optimized profile.
+100k overview median trial P95: 483.7 / 524.5 ms (strict target 500 ms).
+Per-trial P95 values: 483.7, 530.7, 475.2 and 481.8, 538.0, 524.5 ms.
+Both candidate mixed 100k phases returned 320/320 successful reads,
+one first-attempt issuance and one successful activation. No increase
+in recorded admission rejections or pool waits; sampled lock peak zero.
+Post-load representative overview-combined plans: 52.32 / 56.53 ms,
+2713 shared hits, no shared reads or temp writes. These are single-query
+post-load plans, not concurrent request timings. Do not infer that SQL,
+CPU contention, TLS, application overhead or the runner is exonerated.
+Earlier successful retries do not erase this miss.
+
+The benchmark now emits BENCHMARK_RESOURCES around each measured load:
+monotonic elapsed time, harness process CPU, optional host /proc/stat,
+host PSI and harness cgroup v2 CPU counters. Missing or decreasing
+counters are omitted, not zero. Host counters are not process-specific;
+the harness cgroup need not include the database container. No new
+database requests or sampling threads within the measured workload,
+no change to concurrency, SLO, assertion, warmups or retries. Evidence
+collection is diagnostic, not an alternative gate. Next compare
+per-trial resource deltas and query-plan evidence; further optimization
+requires correctness regression and repeated strict profiles.
+Observer durable delivery, package integration, and Termux verification
+remain open. Deployment remains HOLD; no phone action.
+
+### Observer package candidate and resource evidence
+
+CI 46138386183 on 213f0e7 completed 13/13; both strict candidate
+100k overview profiles passed at 342.0 / 333.3 ms, with zero requests
+over 500 ms in the recorded overview samples. Candidate overview-combined
+representative SQL plans took 42.57 / 42.31 ms. Across the six measured
+100k candidate trials, host CPU PSI some time was approximately 90–94%
+of elapsed time, host idle ticks were low, and harness cgroup throttling
+and host IO/memory PSI deltas were zero. This supports CPU competition
+as a hypothesis, not attribution of the previous failed run; it does
+not establish sustained capacity. Keep the 500 ms gate and earlier
+failure records. No production query change.
+
+The new local-only maintenance archive candidate requires exactly 14
+entries (13 payloads plus SHA256SUMS), now including
+gateway-status-observer.py. The current verifier deliberately rejects
+the old 13-entry layout; verify historical packages with their original
+checkout verifier, not by weakening the current allowlist. CI tests
+missing and tampered observer payloads and executes the staged observer
+self-tests after package integrity checks. Packaging is not installation
+or deployment; no automatic observer service or external notifications.
+The observer still uses in-memory state only. Persistent delivery,
+monitor liveness and actual Android/Termux verification remain open.
+
+### Durable local observer candidate (M7-F)
+
+CI 46138985719 on 51abcd7 passed 13/13, including the exact
+14-entry maintenance ZIP verifier and five staged observer tests.
+Strict candidate 100k overview P95: 321.6 / 322.0 ms, zero slow
+overview samples; prior intermittent capacity misses remain evidence.
+
+Opt-in durable mode (disposable fixture, POSIX Python 3.11+):
+provision a separate operator-owned absolute directory, mode 0700.
+Do not reuse the producer status directory or edit the running device.
+
+    python3 gateway-status-observer.py --directory /absolute/private/status --state-directory /absolute/private/observer --watch
+    python3 gateway-status-observer.py --state-directory /absolute/private/observer --check-state
+
+The directory inode has a nonblocking exclusive flock for the writer.
+The fixed observer.json checkpoint (0600) contains only validated
+snapshot state, timestamp, availability flag and at most four
+allowlisted pending event labels with random stable IDs. State and
+outbox are published together by file fsync, rename, directory fsync.
+A pending batch is flushed to local stdout before being acknowledged;
+on restart the same IDs are replayed. A partial delivery or crash
+between flush and acknowledgement can duplicate events. A successful
+stdout flush is not an external receiver acknowledgement, and events
+between observations cannot be recovered. No exactly-once guarantee,
+network delivery or automatic notification service. A failed write or
+output exits nonzero and pending state must not be overwritten.
+Corrupt/incompatible files and clock rollback fail closed; no automatic
+reset or deletion. Abrupt death can leave a private temporary file;
+operator review is required before cleanup. The existing stateless
+mode remains available, with its earlier semantics.
+
+On restart unchanged open flags are deduplicated; a closed flag
+across an unobserved interval does not prove recovery and is not
+reported as such. After an actual unavailable interval open flags can
+be announced again conservatively. Heartbeat check is read-only:
+a valid checkpoint with no pending batch and age 0–90 seconds
+returns 0; missing, invalid, stale, future or pending returns 2.
+A fresh heartbeat is not proof of a live PID, gateway readiness or
+license validity; a stopped or blocked observer becomes detectable
+by an independent periodic checker after expiry. No checker is
+installed automatically. Same-UID tampering and untrusted ancestors
+remain outside the boundary. Real Termux flock/fsync behavior and
+independent liveness scheduling remain unverified. No phone action.

@@ -63,17 +63,34 @@ func (m *gatewayMetrics) report(logger *log.Logger) {
 // No health listener or external notification. A fixed cadence bounds log
 // volume even under a flood. The supervisor/operator must collect the log.
 func (m *gatewayMetrics) monitor(ctx context.Context,logger *log.Logger,interval time.Duration) {
+	m.monitorStatus(ctx,logger,interval,"")
+}
+
+func (m *gatewayMetrics) monitorStatus(ctx context.Context,logger *log.Logger,interval time.Duration,dir string) {
 	ticker:=time.NewTicker(interval)
 	defer ticker.Stop()
 	alerts:=&gatewayAlerts{}
+	started:=time.Now()
+	publish:=func(lifecycle string){
+		if dir!="" {
+			if err:=writeStatus(dir,snapshot(m,alerts,started,time.Now(),lifecycle));err!=nil {
+				logger.Print("gateway_status_write_failed")
+			}
+		}
+	}
+	publish("OBSERVING")
 	for {
 		select {
-		case <-ctx.Done():return
+		case <-ctx.Done():
+			// Signal receipt is not proof that shutdown has completed.
+			publish("STOPPING")
+			return
 		case <-ticker.C:
 			m.report(logger)
 			alerts.sample(m,func(category,event string){
 				logger.Printf("gateway_alert category=%s state=%s",category,event)
 			})
+			publish("OBSERVING")
 		}
 	}
 }

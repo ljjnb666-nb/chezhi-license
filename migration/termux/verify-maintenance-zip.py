@@ -12,6 +12,7 @@ FILES = {
     "cloudflared.disabled.yml", "gateway-service.sh", "NOTICE",
     "maintenance-preflight.sh", "postgres-logging.candidate.conf",
     "encrypted-export.sh", "encrypted-receive.sh", "stage-loopback-tls.sh",
+    "postgres-log-retention.py", "gateway-status-observer.py",
 }
 LIMIT = 64 * 1024 * 1024
 
@@ -53,7 +54,7 @@ def verify(path, expected_zip, expected_checkout):
             raise ValueError("checkout commit mismatch")
         if archive.read("NOTICE") != b"UNSIGNED LOCAL TEST ONLY; NO TUNNEL OR PUBLIC DEPLOYMENT\n":
             raise ValueError("unexpected release notice")
-    print("MAINTENANCE_ZIP_VERIFIED entries=12 unsigned local-only candidate")
+    print(f"MAINTENANCE_ZIP_VERIFIED entries={len(FILES)+1} unsigned local-only candidate")
 
 if __name__ == "__main__":
     if len(sys.argv) != 4:

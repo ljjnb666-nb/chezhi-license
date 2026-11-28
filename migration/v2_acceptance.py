@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import secrets
+import ssl
 import struct
 import subprocess
 import time
@@ -226,6 +227,177 @@ def exercise_capacity(folder, a, b, diagnostics, query, scope, card, key, public
     query("DELETE FROM chezhi_rate_limits")
 
 
+def encrypted_recovery_fixture(folder, dump, signer):
+    """Synthetic CI only. Transfer exact encrypted dump/key bytes to a new
+    private receiver directory. Never print or upload fixture secrets."""
+    source = folder / "v2-recovery-sender"
+    receiver = folder / "v2-recovery-receiver"
+    source.mkdir(mode=0o700)
+    receiver.mkdir(mode=0o700)
+    identity, wrong = receiver / "identity", receiver / "wrong-identity"
+    def age(*args, data=None, success=True):
+        result = subprocess.run(list(map(str,args)), input=data, stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL, timeout=30)
+        assert (result.returncode==0)==success, "age fixture unexpected result"
+        return result.stdout
+    age("age-keygen","-o",identity)
+    age("age-keygen","-o",wrong)
+    identity.chmod(0o600)
+    wrong.chmod(0o600)
+    recipient = age("age-keygen","-y",identity).decode("ascii").strip()
+    container = os.environ["CHEZHI_TEST_POSTGRES_CONTAINER"]
+    dump_bytes = subprocess.run(["docker","exec",container,"cat",dump],
+                                stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,
+                                check=True,timeout=30).stdout
+    key_bytes = signer.read_bytes()
+    assert 0<len(dump_bytes)<=16*1024*1024 and 0<len(key_bytes)<=4096
+    def private_write(path,data):
+        with os.fdopen(os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600),"wb") as stream:
+            stream.write(data)
+    def receive(name,plaintext):
+        ciphertext = age("age","-r",recipient,data=plaintext)
+        trusted = sha256(ciphertext).digest()
+        private_write(source / (name+".age"),ciphertext)
+        # Separate receiver copy; trusted digest is retained independently
+        # in the fixture process, not read from the transferred directory.
+        private_write(receiver / (name+".age"),(source / (name+".age")).read_bytes())
+        received = (receiver / (name+".age")).read_bytes()
+        assert sha256(received).digest()==trusted
+        age("age","-d","-i",wrong,data=received,success=False)
+        damaged = received[:-1]+bytes([received[-1]^1])
+        assert sha256(damaged).digest()!=trusted
+        age("age","-d","-i",identity,data=damaged,success=False)
+        decoded = age("age","-d","-i",identity,data=received)
+        assert sha256(decoded).digest()==sha256(plaintext).digest()
+        return decoded
+    recovered_dump = receive("database",dump_bytes)
+    recovered_key = receiver / "signing-key"
+    private_write(recovered_key,receive("signing",key_bytes))
+    assert signer.read_bytes()==key_bytes and recovered_key.stat().st_mode & 0o777 == 0o600
+    # Ciphertext only on the sender/transfer side; the outer private test
+    # directory is cleaned by the existing suite. Not a production key tool.
+    return recovered_dump,recovered_key
+
+
+def independent_cluster_recovery(root, folder, binary, received, signer, source_cluster,
+                                 old_scope, public_key, pending, card, k2, p2, revoked, k1, p1,
+                                 old_cookie, password, Client, instance, eventually, port):
+    """Disposable second PG18 cluster with fresh role passwords and TLS.
+    No source connection credentials or production data enter this fixture."""
+    started=time.perf_counter()
+    work=folder / "independent-recovery"
+    work.mkdir(mode=0o700)
+    dbname="recovery_fixture"
+    migrator="recovery_migrator"
+    runtime="recovery_runtime"
+    mp,rp=secrets.token_hex(24),secrets.token_hex(24)
+    container=None
+    def docker(*args, data=None, timeout=30):
+        result=subprocess.run(["docker",*args],input=data,stdout=subprocess.PIPE,
+                              stderr=subprocess.DEVNULL,check=True,timeout=timeout)
+        return result.stdout
+    try:
+        container=docker("run","-d","--network","bridge","-p","127.0.0.1::5432",
+                         "-e","POSTGRES_USER="+migrator,"-e","POSTGRES_DB="+dbname,
+                         "-e","POSTGRES_PASSWORD="+mp,"postgres:18.7-alpine",timeout=120).decode().strip()
+        def sql(statement):
+            return docker("exec","-i","-u","postgres",container,"psql","-X","-At",
+                          "-v","ON_ERROR_STOP=1","-U",migrator,"-d",dbname,
+                          data=statement.encode()).decode().strip()
+        def ready():
+            try:
+                return (docker("exec",container,"cat","/proc/1/comm").strip()==b"postgres"
+                        and sql("SELECT 1;")=="1")
+            except subprocess.CalledProcessError:
+                return False
+        eventually(ready,timeout=60)
+        address=docker("port",container,"5432/tcp").decode().strip()
+        assert re.fullmatch(r"127\.0\.0\.1:[0-9]{1,5}",address), "unexpected fixture listener"
+        assert sql("SELECT system_identifier::text FROM pg_control_system();")!=source_cluster
+        assert int(sql("SHOW server_version_num;"))//10000==18
+        assert sql("SELECT count(*) FROM pg_tables WHERE schemaname='public';")=="0"
+        docker("exec","-i","-u","postgres",container,"pg_restore","-U",migrator,"-d",dbname,
+               "--exit-on-error","--single-transaction","--no-owner","--no-acl",data=received,timeout=60)
+        sql(f"CREATE ROLE {runtime} LOGIN PASSWORD '{rp}';")
+        sql((root / "migration/postgres_runtime_grants.sql").read_text().replace("chezhi_runtime",runtime))
+        # Restore only business state; fresh runtime/migration DSNs, fresh
+        # certificate and fresh CSRF secret, no source configuration copied.
+        cert,key,csrf=(work / x for x in ("tls-cert","tls-key","csrf-key"))
+        openssl("req","-x509","-newkey","rsa:2048","-nodes","-days","1",
+                "-keyout",key,"-out",cert,"-subj","/CN=localhost",
+                "-addext","subjectAltName=DNS:localhost,IP:127.0.0.1")
+        key.chmod(0o600)
+        with os.fdopen(os.open(csrf,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600),"w") as stream:
+            stream.write(secrets.token_hex(32))
+        base={"HOME":str(work),"PATH":os.environ["PATH"]}
+        def dsn(user,pw):
+            return f"postgres://{user}:{pw}@{address}/{dbname}?sslmode=disable"
+        m=dict(base,CHEZHI_DATABASE_URL=dsn(migrator,mp))
+        r=dict(base,CHEZHI_DATABASE_URL=dsn(runtime,rp))
+        def cli(env,*args,success=True):
+            result=subprocess.run([binary,*args],env=env,stdout=subprocess.DEVNULL,
+                                  stderr=subprocess.DEVNULL,timeout=20)
+            assert (result.returncode==0)==success,"independent recovery CLI unexpected result"
+        service,diag=port(),port()
+        host=f"localhost:{service}"
+        env=dict(r,CHEZHI_MODE="server",CHEZHI_PUBLIC_ORIGIN="https://"+host,
+                 CHEZHI_LISTEN=f"127.0.0.1:{service}",CHEZHI_DIAGNOSTICS=f"127.0.0.1:{diag}",
+                 CHEZHI_TLS_CERT=str(cert),CHEZHI_TLS_KEY=str(key),CHEZHI_CSRF_KEY_FILE=str(csrf),
+                 CHEZHI_SIGNING_KEY_FILE=str(signer),CHEZHI_LICENSE_PER_MINUTE="120",
+                 CHEZHI_LICENSE_GLOBAL_PER_MINUTE="240")
+        cli(m,"db-check","--migrator")
+        cli(env,success=False)
+        cli(r,"db-recover-security",dbname,success=False)
+        immutable=("cards","secure_bindings","orders","owner","members","plans")
+        def snapshot(table):
+            return sql(f"SELECT to_jsonb(t)::text FROM chezhi_{table} t ORDER BY to_jsonb(t)::text;")
+        before={table:snapshot(table) for table in immutable}
+        prior_history=snapshot("signing_history")
+        prior_history_count=int(sql("SELECT count(*) FROM chezhi_signing_history;"))
+        prior_audit=sql("SELECT to_jsonb(t)::text FROM chezhi_audit t ORDER BY position;")
+        prior_audit_position=int(sql("SELECT coalesce(max(position),0) FROM chezhi_audit;"))
+        prior_policy=sql("SELECT (to_jsonb(t)-'deployment')::text FROM chezhi_signing_policy t;")
+        assert int(sql("SELECT count(*) FROM chezhi_challenges;"))>0
+        assert int(sql("SELECT count(*) FROM chezhi_sessions;"))>0
+        cli(m,"db-recover-security",dbname)
+        for table in ("challenges","sessions","rate_limits"):
+            assert sql(f"SELECT count(*) FROM chezhi_{table};")=="0",f"recovery did not clear {table}"
+        for table in immutable:
+            assert snapshot(table)==before[table],f"recovery changed immutable {table}"
+        scope,pub=sql("SELECT deployment,public_key FROM chezhi_signing_policy;").split("|")
+        assert re.fullmatch(r"[0-9a-f]{64}",scope) and scope!=old_scope and pub==public_key
+        assert sql("SELECT (to_jsonb(t)-'deployment')::text FROM chezhi_signing_policy t;")==prior_policy
+        # Recovery appends one public signing-history event; it must not
+        # rewrite or remove any previous event. Check exact old rows.
+        assert int(sql("SELECT count(*) FROM chezhi_signing_history;"))==prior_history_count+1
+        assert sql(f"SELECT to_jsonb(t)::text FROM chezhi_signing_history t WHERE deployment<>'{scope}' ORDER BY to_jsonb(t)::text;")==prior_history
+        assert sql(f"SELECT public_key,action FROM chezhi_signing_history WHERE deployment='{scope}';")==public_key+"|recovery"
+        assert sql(f"SELECT to_jsonb(t)::text FROM chezhi_audit t WHERE position<={prior_audit_position} ORDER BY position;")==prior_audit
+        assert sql(f"SELECT action,actor FROM chezhi_audit WHERE position>{prior_audit_position} ORDER BY position;")=="security_recovered|admin"
+        cli(m,"db-recover-security",dbname,success=False)
+        assert int(sql("SELECT count(*) FROM chezhi_signing_history;"))==prior_history_count+1
+        assert sql(f"SELECT count(*) FROM chezhi_audit WHERE position>{prior_audit_position};")=="1"
+        print("PASS V2_RECOVERY_HISTORY_APPEND_ONLY exact old history and audit, one recovery event, repeated reset denied",flush=True)
+        cli(r,"db-check","--runtime")
+        cli(dict(env,CHEZHI_DATABASE_URL=m["CHEZHI_DATABASE_URL"]),success=False)
+        tls=ssl.create_default_context(cafile=str(cert))
+        client=Client(service,host,tls)
+        diagnostic=Client(diag,f"127.0.0.1:{diag}")
+        with instance(binary,env,diagnostic):
+            assert client.page("/",old_cookie)[0]==303
+            new_cookie=client.login("admin",password)
+            assert client.page("/?view=cards",new_cookie)[0]==200
+            assert post(client,"validate",pending,403)=="authorization_denied"
+            credential=post(client,"renew",prepare(client,scope,"renew",card,k2,p2))
+            verify(folder,credential,scope,p2,card,public_key)
+            assert post(client,"validate",prepare(client,scope,"validate",revoked,k1,p1),403)=="authorization_denied"
+            assert client.license("activate",card,"legacy")["data"]["status"]=="secure_protocol_required"
+        print(f"PASS V2_INDEPENDENT_CLUSTER_RECOVERY pg18 fresh roles/TLS/CSRF, signed renewal, old session/challenge denial, revocation; seconds={time.perf_counter()-started:.3f}",flush=True)
+    finally:
+        if container:
+            docker("rm","-f",container)
+
+
 def run_v2_suite(root, folder, binary, common, migration_env, runtime_env, password,
                  grants, pg, sql, cli, Client, instance, eventually, port, cert_ctx):
     vector()
@@ -362,10 +534,21 @@ def run_v2_suite(root, folder, binary, common, migration_env, runtime_env, passw
         recovery_started=time.perf_counter()
         pg("createdb",restored)
         created_restore=True
-        pg("pg_restore","-d",restored,"--exit-on-error","--single-transaction","--no-owner","--no-acl",dump)
+        encrypted=os.getenv("CHEZHI_TEST_ENCRYPTED_V2_RECOVERY")=="1"
+        recovery_signer=signer
+        if encrypted:
+            received,recovery_signer=encrypted_recovery_fixture(folder,dump,signer)
+            subprocess.run(["docker","exec","-i","-u","postgres",
+                            os.environ["CHEZHI_TEST_POSTGRES_CONTAINER"],
+                            "pg_restore","-U","postgres","-d",restored,"--exit-on-error",
+                            "--single-transaction","--no-owner","--no-acl"],
+                           input=received,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,
+                           check=True,timeout=60)
+        else:
+            pg("pg_restore","-d",restored,"--exit-on-error","--single-transaction","--no-owner","--no-acl",dump)
         restore_seconds=time.perf_counter()-recovery_started
         sql(None,db=restored,stdin=grants)
-        er,rr,dr,_=endpoint(restored,signer)
+        er,rr,dr,_=endpoint(restored,recovery_signer)
         cli(er,success=False)
         assert int(query("SELECT count(*) FROM chezhi_challenges",restored))>0
         before=query("SELECT to_jsonb(t)::text FROM chezhi_secure_bindings t ORDER BY card_id",restored)
@@ -377,6 +560,9 @@ def run_v2_suite(root, folder, binary, common, migration_env, runtime_env, passw
         new_scope,new_pub=trust(restored)
         assert new_scope!=scope and new_pub==public_key
         cli(target(runtime_env,restored),"db-check","--runtime")
+        if encrypted:
+            wrong_signer,_=make_signer("v2-recovery-wrong-"+suffix)
+            cli(dict(er,CHEZHI_SIGNING_KEY_FILE=str(wrong_signer)),success=False)
         with instance(binary,er,dr):
             assert post(rr,"validate",pending,403)=="authorization_denied"
             renewed=post(rr,"renew",prepare(rr,new_scope,"renew",card,k2,p2))
@@ -386,6 +572,18 @@ def run_v2_suite(root, folder, binary, common, migration_env, runtime_env, passw
         print(f"V2_RECOVERY_TIMING dump_seconds={dump_seconds:.3f} restore_create_seconds={restore_seconds:.3f} "
               f"verified_recovery_seconds={time.perf_counter()-recovery_started:.3f}",flush=True)
         print("PASS V2 native logical restore, old challenge rejection, changed scope, preserved secure bindings and revoked state",flush=True)
+        if encrypted:
+            print("PASS V2_ENCRYPTED_RECOVERY exact encrypted fixture dump and signing key transfer, wrong identity/tamper/key denial, recovered signed renewal and revocation",flush=True)
+            if os.getenv("CHEZHI_TEST_INDEPENDENT_V2_RECOVERY")=="1":
+                source_cluster=query("SELECT system_identifier::text FROM pg_control_system()")
+                source_before={table:query(f"SELECT to_jsonb(t)::text FROM chezhi_{table} t ORDER BY to_jsonb(t)::text")
+                               for table in ("cards","secure_bindings","orders","signing_policy","signing_history")}
+                independent_cluster_recovery(root,folder,binary,received,recovery_signer,source_cluster,
+                                             scope,public_key,pending,card,k2,p2,revoked,k1,p1,cookie,password,
+                                             Client,instance,eventually,port)
+                for table,expected in source_before.items():
+                    assert query(f"SELECT to_jsonb(t)::text FROM chezhi_{table} t ORDER BY to_jsonb(t)::text")==expected
+                print("PASS V2_INDEPENDENT_SOURCE_UNCHANGED",flush=True)
 
         new_signer,new_key=make_signer("v2-rotated-"+suffix)
         old_id=sha256(bytes.fromhex(public_key)).hexdigest()
