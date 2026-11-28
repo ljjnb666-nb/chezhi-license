@@ -381,3 +381,34 @@ test locally with explicit trust and restore previous reviewed version
 if checks fail. No automatic activation/rollback, remote notification,
 per-client edge rate control or public connector configuration is
 implemented. No real phone modification during M4 endurance.
+
+### Administrative admission isolation
+
+CI 46125207179 (head 8d47e78, checkout 9504eab) passed 13/13,
+including alert transitions and 12-entry local maintenance ZIP
+verification. Paced renewal: 24/24, 48 requests in 77.60s, P95
+17.23ms. The repeated dashboard candidate passed but standalone
+single-trial target missed and 19/320 mixed reads returned 503.
+
+Source audit identified a concrete starvation mechanism: each server
+instance has eight shared administrative admission slots and the
+mixed benchmark runs eight reading workers per instance. A concurrent
+issuance request can repeatedly encounter a full shared queue.
+This is a plausible contributor, not proof of the cause of every 503.
+The candidate preserves eight admin read slots and adds a separate
+one-slot admin POST admission path. This increases the maximum admin
+in-flight count from eight to nine; the 12-connection database pool,
+public admission, export admission, authorization, CSRF and transaction
+boundaries remain unchanged. The POST slot is not reserved for a
+specific authenticated account and is not a public per-client quota.
+The extra contention and memory cost require measurement.
+
+Loopback-only diagnostics expose fixed-cardinality admission rejection
+counters by admin_read, admin_write, public and export. The benchmark
+records differences per instance for the mixed phase, including failure;
+historical binaries lacking those counters are identified as unavailable.
+Other causes of 503 (database errors, drain, application data failures)
+are not counted as admission rejection. Keep existing performance
+workloads and acceptance limits unchanged. A real before/after result
+and renewed phone capacity review are required before activation.
+No change to the frozen M4/M6 versions or physical phone.
