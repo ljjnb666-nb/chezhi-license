@@ -18,6 +18,7 @@ import (
 	"os/signal"
 	"regexp"
 	"syscall"
+	"sync"
 	"time"
 )
 
@@ -131,6 +132,38 @@ func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(data)
 }
 
+// Limit accepted connections as well as in-flight application requests.
+type limitedListener struct {
+	net.Listener
+	slots chan struct{}
+	done chan struct{}
+	once sync.Once
+}
+
+type limitedConn struct {
+	net.Conn
+	once sync.Once
+	release func()
+}
+func (c *limitedConn) Close() error {
+	err:=c.Conn.Close()
+	c.once.Do(c.release)
+	return err
+}
+func (l *limitedListener) Accept() (net.Conn,error) {
+	select {
+	case l.slots<-struct{}{}:
+	case <-l.done: return nil,net.ErrClosed
+	}
+	c,err:=l.Listener.Accept()
+	if err!=nil { <-l.slots; return nil,err }
+	return &limitedConn{Conn:c,release:func(){<-l.slots}},nil
+}
+func (l *limitedListener) Close() error {
+	l.once.Do(func(){close(l.done)})
+	return l.Listener.Close()
+}
+
 func run() error {
 	if len(os.Args) != 1 { return errors.New("no command arguments; configure reviewed local environment") }
 	ca, err := os.ReadFile(os.Getenv("CHEZHI_GATEWAY_ORIGIN_CA"))
@@ -150,7 +183,7 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(),os.Interrupt,syscall.SIGTERM)
 	defer stop()
 	errs := make(chan error,1)
-	go func(){ errs <- srv.ServeTLS(l,"","") }()
+	go func(){ errs <- srv.ServeTLS(&limitedListener{Listener:l,slots:make(chan struct{},32),done:make(chan struct{})},"","") }()
 	log.Print("local license gateway started")
 	select {
 	case err := <-errs: return err
