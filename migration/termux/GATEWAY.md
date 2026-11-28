@@ -276,7 +276,12 @@ The age recipient must be independently verified with the receiver;
 never place its private decryption identity on the phone.
 
 The receiver-side encrypted-receive.sh requires age, compatible
-pg_restore and a private identity file. Use encrypted receiver storage
+pg_restore and a private identity file.
+The receiver now requires a fourth argument: the lowercase SHA256 of
+ciphertext obtained independently through an authenticated channel.
+It rejects a differing manifest, hashes a private copy before decryption,
+and budgets space for both ciphertext and plaintext. The digest is not
+trusted merely because it is included in the transferred directory. Use encrypted receiver storage
 and a fresh private output directory. It checks the ciphertext
 manifest, authenticates decryption, fully decodes the archive and
 publishes the recovered logical dump only after verification. On
@@ -300,3 +305,33 @@ backup schedule or remote identity provisioning is authorized.
 Retain the original M4 daily backup, existing key material and phone
 endurance unchanged. Actual off-device storage and recovery still
 require explicit operator approval and physical verification.
+
+### Certificate transition rehearsal and receiver trust gate
+
+CI 46122663338 (head 721a0c6, checkout 1b4655f) passed 13/13,
+including actual age + PG18 fixture restore. Paced signed renewals
+passed 24/24, 48 requests in 77.40s, sample P95 12.37ms, zero errors
+and retries. Dashboard candidate repeated target passed but mixed
+reads returned 14/320 HTTP 503, with fourteen issuance 503s before
+success. Sustained capacity is still unresolved.
+
+The strengthened receiver requires the trusted ciphertext SHA256 as
+argument four. The tests additionally reject missing trust input,
+valid replacement ciphertext encrypted to the same recipient, and
+a damaged stream even when its digest is deliberately supplied.
+This does not establish sender authenticity unless the operator
+actually authenticates the expected digest out of band.
+
+stage-loopback-tls.sh creates a new private candidate directory only,
+with a fresh 30-day RSA certificate/key, loopback IP SAN, serverAuth,
+0600 modes and independent OpenSSL verification. It refuses existing
+destinations and prints only public fingerprint and expiry.
+The real loopback TLS fixture exercises old trust, new trust,
+cross-trust rejection and restoration of old trust, preserving the
+old files. This is a synthetic transition rehearsal, not a rotation
+of the physical M4 certificate or a deployment mechanism. No changes
+to live origin/gateway configuration, trust distribution, certificate
+replacement, restart or recovery key export are performed. A real
+rotation requires an approved maintenance window after endurance,
+coordination of all existing trust consumers, verified recovery and
+a rollback plan. No real secrets should be included in CI artifacts.
