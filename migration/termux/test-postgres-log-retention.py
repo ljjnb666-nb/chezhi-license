@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 import importlib.util
+import fcntl
+import gzip
+import hashlib
 import os
 from pathlib import Path
 import tempfile
@@ -67,6 +70,63 @@ class RetentionTests(unittest.TestCase):
             self.assertTrue(result["total_log_over_budget"])
             self.assertEqual(files[0].read_bytes(), b"fixture")
             self.assertEqual(legacy.read_bytes(), b"legacy fixture")
+
+    def test_offline_archive(self):
+        now=1795900000
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp)
+            pg=root/"pgdata"
+            ctl=root/"managed-v1"
+            pg.mkdir(mode=0o700)
+            ctl.mkdir(mode=0o700)
+            (ctl/"installed").write_text("managed-v1\n")
+            logs=pg/"chezhi-pg-log"
+            logs.mkdir(mode=0o700)
+            legacy=root/"postgres.log"
+            legacy.write_bytes(b"legacy")
+            files=[]
+            for i in range(10):
+                path=logs/f"postgresql-20261101-0101{i:02}.log"
+                path.write_bytes(("fixture "+str(i)).encode())
+                path.chmod(0o600)
+                os.utime(path,(now-(20-i)*86400,)*2)
+                files.append(path)
+            (pg/"current_logfiles").write_text("stderr chezhi-pg-log/"+files[0].name+"\n")
+            with self.assertRaises(ValueError):
+                retention.archive_offline(root,now,status=lambda:0)
+            (pg/"postmaster.pid").write_text("synthetic")
+            with self.assertRaises(ValueError):
+                retention.archive_offline(root,now,status=lambda:3)
+            (pg/"postmaster.pid").unlink()
+            for lock in (ctl/"controller.lock",ctl/"control.lock",root/"service.lock"):
+                with lock.open("a") as stream:
+                    lock.chmod(0o600)
+                    fcntl.flock(stream,fcntl.LOCK_EX|fcntl.LOCK_NB)
+                    with self.assertRaises(ValueError):
+                        retention.archive_offline(root,now,status=lambda:3)
+            archives=root/"pg-log-archives"
+            archives.mkdir(mode=0o700)
+            content=files[1].read_bytes()
+            name=files[1].name+"."+hashlib.sha256(content).hexdigest()+".gz"
+            corrupt=archives/name
+            corrupt.write_bytes(b"invalid gzip")
+            corrupt.chmod(0o600)
+            with self.assertRaises(OSError):
+                retention.archive_offline(root,now,status=lambda:3)
+            self.assertEqual(len(list(logs.iterdir())),10)
+            self.assertEqual(corrupt.read_bytes(),b"invalid gzip")
+            corrupt.unlink()
+            result=retention.archive_offline(root,now,status=lambda:3)
+            self.assertEqual(result["archived"],2)
+            self.assertEqual(result["remaining_eligible"],0)
+            self.assertEqual(result["removed_bytes"],18)
+            self.assertEqual(gzip.decompress(corrupt.read_bytes()),content)
+            self.assertEqual(len(list(logs.iterdir())),8)
+            self.assertTrue(files[0].exists())
+            self.assertTrue(all(p.exists() for p in files[3:]))
+            self.assertEqual(legacy.read_bytes(),b"legacy")
+            self.assertEqual(retention.archive_offline(root,now,status=lambda:3)["archived"],0)
+            self.assertEqual(len(list(archives.iterdir())),2)
 
 if __name__ == "__main__":
     unittest.main()
