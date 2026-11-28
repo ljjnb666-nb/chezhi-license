@@ -225,7 +225,8 @@ func (l *limitedListener) Close() error {
 }
 
 func run() error {
-	if len(os.Args) != 1 { return errors.New("no command arguments; configure reviewed local environment") }
+	checkTLS:=len(os.Args)==2 && os.Args[1]=="tls-status"
+	if len(os.Args)!=1 && !checkTLS { return errors.New("only tls-status is supported; configure reviewed local environment") }
 	ca, err := os.ReadFile(os.Getenv("CHEZHI_GATEWAY_ORIGIN_CA"))
 	if err != nil { return errors.New("cannot read origin CA") }
 	roots := x509.NewCertPool()
@@ -236,6 +237,7 @@ func run() error {
 	if err != nil { return errors.New("cannot load gateway TLS certificate") }
 	leaf, err := x509.ParseCertificate(pair.Certificate[0])
 	if err != nil || leaf.VerifyHostname("127.0.0.1") != nil || time.Now().Before(leaf.NotBefore) || time.Now().After(leaf.NotAfter) { return errors.New("gateway certificate must cover 127.0.0.1 and be current") }
+	if checkTLS { return tlsStatus(g.upstream.Host,roots,leaf) }
 	l, err := net.Listen("tcp",listen)
 	if err != nil { return errors.New("cannot open gateway loopback listener") }
 	defer l.Close()
