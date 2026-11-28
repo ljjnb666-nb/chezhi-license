@@ -42,6 +42,15 @@ class VerificationTests(unittest.TestCase):
             check(entries + [("../escape", b"bad")], reject=True)
             check(entries + [entries[0]], reject=True)
             check(entries[:-1], reject=True)
+            # A legacy archive without the observer must not be silently accepted,
+            # even when its manifest is recomputed consistently.
+            legacy = {name: data for name, data in files.items()
+                      if name != "gateway-status-observer.py"}
+            legacy_manifest = "".join(hashlib.sha256(data).hexdigest() + "  " + name + "\n"
+                                      for name, data in sorted(legacy.items())).encode()
+            check(list(legacy.items()) + [("SHA256SUMS", legacy_manifest)], reject=True)
+            check([(name, b"tamper" if name == "gateway-status-observer.py" else data)
+                   for name, data in entries], reject=True)
             check([(name, b"tamper" if name == "GATEWAY.md" else data)
                    for name, data in entries], reject=True)
             link = zipfile.ZipInfo("GATEWAY.md")
