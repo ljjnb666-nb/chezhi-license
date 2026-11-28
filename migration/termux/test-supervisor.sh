@@ -21,6 +21,7 @@ cleanup() {
 trap cleanup EXIT
 for name in supervisor managed-backup; do
     sed -e '/^case "$HOME" in /c\:' -e '/^\[ "$(uname -m)" = aarch64 \]/c\:' "$src/$name.sh" > "$tmp/code/$name.sh"
+    if [ "$name" = supervisor ]; then sed -i 's/^            sleep 15$/            sleep 1/' "$tmp/code/$name.sh"; fi
     bash -n "$tmp/code/$name.sh"
 done
 cat > "$tmp/code/staging.sh" <<'FIXTURE'
@@ -40,7 +41,7 @@ esac
 FIXTURE
 cat > "$tmp/mock/curl" <<'FIXTURE'
 #!/bin/bash
-exit 0
+[ ! -f "$HOME/fixture-unready" ]
 FIXTURE
 cat > "$tmp/mock/pg_dump" <<'FIXTURE'
 #!/bin/bash
@@ -77,12 +78,24 @@ bash "$tmp/code/managed-backup.sh"
 printf '2026-11-27\n' > "$HOME/fixture-date"
 if bash "$tmp/code/managed-backup.sh"; then echo 'clock rollback accepted'; exit 1; fi
 printf '2026-11-28\n' > "$HOME/fixture-date"
+# A corrupted existing backup must block retention and remain untouched.
+printf 'corrupt\n' >> "$root/managed-daily/2026-11-22/database.dump"
+if bash "$tmp/code/managed-backup.sh"; then echo 'corrupt backup accepted'; exit 1; fi
+test -f "$root/managed-daily/2026-11-22/database.dump"
+printf 'synthetic archive\n' > "$root/managed-daily/2026-11-22/database.dump"
+openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj /CN=127.0.0.1 \
+    -addext subjectAltName=IP:127.0.0.1 -keyout "$root/fixture-key" -out "$root/tls-cert" 2>/dev/null
 bash "$tmp/code/supervisor.sh" install
 if bash "$tmp/code/supervisor.sh" install; then echo 'duplicate install accepted'; exit 1; fi
 bash "$tmp/code/supervisor.sh" boot-enable
 test -f "$HOME/.termux/boot/90-chezhi-staging"
 bash "$tmp/code/supervisor.sh" boot-disable
 test ! -e "$HOME/.termux/boot/90-chezhi-staging"
+# Refuse managed adoption while an independent foreground instance owns the lock.
+(
+    flock -n 9
+    if bash "$tmp/code/supervisor.sh" start 9>&-; then echo 'live manual service adopted'; exit 1; fi
+) 9>"$root/service.lock"
 bash "$tmp/code/supervisor.sh" start & parent=$!
 for i in $(seq 1 30); do [ -s "$root/fixture-pid" ] && break; sleep 1; done
 old="$(cat "$root/fixture-pid")"
@@ -96,9 +109,22 @@ for i in $(seq 1 35); do
 done
 test "$new" != "$old"
 kill -0 "$new"
+# The still-running child becomes unready; watchdog must request graceful
+# termination through runit and leave the supervisor responsible for restart.
+old="$new"
+touch "$HOME/fixture-unready"
+for i in $(seq 1 45); do
+    new="$(cat "$root/fixture-pid")"
+    if [ "$new" != "$old" ] && kill -0 "$new" 2>/dev/null; then break; fi
+    sleep 1
+done
+rm -- "$HOME/fixture-unready"
+test "$new" != "$old"
+kill -0 "$new"
+grep -q HEALTH_RECOVERY_REQUEST "$root/managed-v1/log-health/current"
 bash "$tmp/code/supervisor.sh" stop
 wait "$parent"
 parent=''
 if kill -0 "$new" 2>/dev/null; then echo 'service still alive'; exit 1; fi
 (flock -n 9) 9>"$root/service.lock"
-printf 'PASS isolated real runit restart, duplicate denial, boot opt-in/out, controlled stop, managed backup retention and clock rollback\n'
+printf 'PASS isolated real runit restart, duplicate denial, boot opt-in/out, controlled stop, readiness watchdog recovery, manual exclusion, corrupt backup retention and clock rollback\n'
