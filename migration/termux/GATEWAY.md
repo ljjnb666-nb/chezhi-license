@@ -705,3 +705,29 @@ random and temporary, not production credentials. No real
 physical host transfer, production key backup, signed release,
 or actual phone restore; no changes to application SQL or
 capacity gates. New candidate remains pending CI.
+
+### Independent recovery history invariant correction
+
+CI 46133119043 (head 3d5fe77, checkout a159a85) passed 12/13.
+Both strict capacity profiles passed (100k overview 360.8/380.2ms,
+orders 230.3/218.0ms), with all four mixed phases passing. This
+does not erase prior capacity failures. Same-cluster encrypted
+V2 recovery passed again. Independent PG18 restore reached the
+post-reset equality assertion in v2_acceptance.py line 358.
+The previous test incorrectly included signing_history in the
+immutable tables: refreshSigningScope in signing_policy.go
+explicitly appends one recovery event when it creates a new scope.
+The failure log did not identify the individual table, so this is
+a source-supported test diagnosis, not proof that all other rows
+are unchanged. The new assertions report the table on a mismatch.
+
+Require exact immutable cards, bindings, orders, owner, members
+and plans; unchanged policy fields except the new deployment;
+all previous signing-history rows unchanged plus exactly one
+recovery event with original public key and new scope. Require
+all prior audit rows unchanged plus one security_recovered/admin
+event, cleared sessions/challenges/rate buckets and repeated
+reset refusal without extra history/audit events. CI requires
+V2_RECOVERY_HISTORY_APPEND_ONLY along with the existing independent
+cluster and source-unchanged markers. No runtime or security
+behavior changed. New tests await CI; no deployment or phone action.
