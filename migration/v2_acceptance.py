@@ -417,7 +417,7 @@ def run_v2_suite(root, folder, binary, common, migration_env, runtime_env, passw
                     CHEZHI_LISTEN="127.0.0.1:18443",
                     CHEZHI_PUBLIC_ORIGIN="https://127.0.0.1:18443",
                     CHEZHI_DIAGNOSTICS=f"127.0.0.1:{dg}",
-                    CHEZHI_LICENSE_PER_MINUTE="120",CHEZHI_LICENSE_GLOBAL_PER_MINUTE="240")
+                    CHEZHI_LICENSE_PER_MINUTE="60",CHEZHI_LICENSE_GLOBAL_PER_MINUTE="240")
             direct=Client(18443,"127.0.0.1:18443",cert_ctx)
             diagnostic=Client(dg,f"127.0.0.1:{dg}")
             gwctx=ssl.create_default_context(cafile=str(gateway_cert))
@@ -425,6 +425,10 @@ def run_v2_suite(root, folder, binary, common, migration_env, runtime_env, passw
             gwenv=dict(PATH=os.environ["PATH"],CHEZHI_GATEWAY_HOST="license.example.invalid",
                        CHEZHI_GATEWAY_ORIGIN_CA=common["CHEZHI_TLS_CERT"],
                        CHEZHI_GATEWAY_TLS_CERT=str(gateway_cert),CHEZHI_GATEWAY_TLS_KEY=str(gateway_key))
+            # Reset only the isolated synthetic suite's previous quota rows,
+            # before the gateway origin starts; use its default 60/min quota.
+            assert live.startswith("chezhi_v2_")
+            query("DELETE FROM chezhi_rate_limits")
             with instance(binary,eg,diagnostic):
                 admin=direct.login("admin",password)
                 gateway_card=direct.issue(admin,"v2-gateway-"+suffix)
@@ -451,6 +455,38 @@ def run_v2_suite(root, folder, binary, common, migration_env, runtime_env, passw
                         assert post(gw,op,request,403)=="authorization_denied"
                     assert post(gw,"challenge",dict(key=gateway_card,public_key=gpub,operation="renew"),403,
                                 {"Origin":"https://example.invalid"})=="forbidden"
+                    if os.getenv("CHEZHI_TEST_GATEWAY_PACED")=="1":
+                        # Below the conservative 48/minute budget. One real
+                        # challenge + renew per transaction, no retry, no
+                        # quota reset within the observation window.
+                        def stable_state():
+                            return (query("SELECT to_jsonb(t)::text FROM chezhi_secure_bindings t ORDER BY card_id"),
+                                    query("SELECT to_jsonb(t)::text FROM chezhi_cards t ORDER BY id"))
+                        stable=stable_state()
+                        seen=set()
+                        timings=[]
+                        start=time.monotonic()
+                        for _ in range(24):
+                            time.sleep(1.6)
+                            begin=time.perf_counter()
+                            req=prepare(gw,rotated_scope,"renew",gateway_card,gkey,gpub)
+                            challenge_ms=(time.perf_counter()-begin)*1000
+                            time.sleep(1.6)
+                            begin=time.perf_counter()
+                            renewal=post(gw,"renew",req)
+                            renewal_ms=(time.perf_counter()-begin)*1000
+                            verify(folder,renewal,rotated_scope,gpub,gateway_card,new_key)
+                            assert renewal["nonce"] not in seen and renewal["revision"]==data["revision"]
+                            assert renewal["license_expires_at"]==data["license_expires_at"]
+                            seen.add(renewal["nonce"])
+                            timings.extend((challenge_ms,renewal_ms))
+                        elapsed=time.monotonic()-start
+                        assert elapsed>=75 and len(seen)==24 and stable_state()==stable
+                        ordered=sorted(timings)
+                        print(f"GATEWAY_PACED transactions=24 requests=48 seconds={elapsed:.2f} "
+                              f"sample_p95_ms={ordered[(95*len(ordered)+99)//100-1]:.2f} "
+                              "retries=0 errors=0 unique_nonces=24 stable_binding_and_cards=true",flush=True)
+                        print("PASS GATEWAY_PACED",flush=True)
                     assert direct.form("/?view=cards",dict(csrf=direct.csrf("/?view=cards",admin),
                                        id=data["license_id"],action="revoke"),admin)[0]==200
                     assert post(gw,"validate",prepare(gw,rotated_scope,"validate",gateway_card,gkey,gpub),403)=="authorization_denied"
