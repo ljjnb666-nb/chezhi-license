@@ -53,6 +53,7 @@ case "$1" in
         # Refuse to adopt a live manual service. The staging script still
         # owns the actual exclusive service lock for each child lifetime.
         (flock -n 9 || die 'Stop the existing foreground service first.') 9>"$root/service.lock"
+        rm -f -- "$ctl/stop-requested"
         main_pid='' backup_pid=''
         cleanup() {
             trap '' INT TERM HUP
@@ -69,12 +70,17 @@ case "$1" in
         # Exit if either supervisor itself dies; its service child may still
         # own the staging lock. Never kill an unrelated PID or restart over it.
         wait -n "$main_pid" "$backup_pid" || true
+        if [ -f "$ctl/stop-requested" ]; then exit 0; fi
         die 'A runsv supervisor exited; inspect controller status before restarting.'
         ;;
     stop)
         # Do not stop a manually launched staging instance.
+        sv -w 35 down "$ctl/backup"
+        sv -w 45 down "$ctl/service"
+        printf 'requested\n' > "$ctl/stop-requested"
         sv -w 35 exit "$ctl/backup"
-        sv -w 45 exit "$ctl/service"
+        # The controller owns the remaining supervisor and shutdown sequence.
+        (flock -w 60 8 || die 'Controller shutdown incomplete; inspect status.') 8>"$ctl/controller.lock"
         printf 'Managed services stopped; PostgreSQL remains up. Use staging.sh stop-db if desired.\n'
         ;;
     status)
