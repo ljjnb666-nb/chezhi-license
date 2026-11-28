@@ -623,9 +623,16 @@ jobs:
           CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build -trimpath -o bin/local-license-gateway/chezhi-gateway-android-arm64 ./cmd/license-gateway
           readelf -h bin/local-license-gateway/chezhi-gateway-android-arm64 | grep -E 'Machine:.*AArch64'
           git rev-parse HEAD > bin/local-license-gateway/source-commit.txt
-          cp migration/termux/GATEWAY.md migration/termux/cloudflared.disabled.yml migration/termux/gateway-service.sh bin/local-license-gateway/
+          cp migration/termux/GATEWAY.md migration/termux/cloudflared.disabled.yml migration/termux/gateway-service.sh migration/termux/maintenance-preflight.sh migration/termux/postgres-logging.candidate.conf migration/termux/encrypted-export.sh migration/termux/encrypted-receive.sh migration/termux/stage-loopback-tls.sh bin/local-license-gateway/
           printf '%s\n' 'UNSIGNED LOCAL TEST ONLY; NO TUNNEL OR PUBLIC DEPLOYMENT' > bin/local-license-gateway/NOTICE
-          (cd bin/local-license-gateway && sha256sum chezhi-gateway-android-arm64 source-commit.txt GATEWAY.md cloudflared.disabled.yml gateway-service.sh NOTICE > SHA256SUMS && sha256sum -c SHA256SUMS)
+          (cd bin/local-license-gateway && sha256sum chezhi-gateway-android-arm64 source-commit.txt GATEWAY.md cloudflared.disabled.yml gateway-service.sh NOTICE maintenance-preflight.sh postgres-logging.candidate.conf encrypted-export.sh encrypted-receive.sh stage-loopback-tls.sh > SHA256SUMS && sha256sum -c SHA256SUMS)
+      - name: Exact maintenance package integrity and negative cases
+        run: |
+          set -euo pipefail
+          python3 migration/termux/test-maintenance-zip.py
+          python3 -m zipfile -c bin/local-maintenance.zip bin/local-license-gateway/*
+          digest="$(sha256sum bin/local-maintenance.zip | cut -d ' ' -f1)"
+          python3 migration/termux/verify-maintenance-zip.py bin/local-maintenance.zip "$digest" "$(git rev-parse HEAD)"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: local-license-gateway-android-arm64-unsigned
