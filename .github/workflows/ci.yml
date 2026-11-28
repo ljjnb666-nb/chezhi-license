@@ -409,6 +409,7 @@ jobs:
           grep -F 'PASS GATEWAY_REAL_V2' bin/standalone-acceptance.txt
           grep -F 'PASS GATEWAY_PACED' bin/standalone-acceptance.txt
           grep -F 'PASS V2_ENCRYPTED_RECOVERY' bin/standalone-acceptance.txt
+          grep -F 'PASS V2_RECOVERY_HISTORY_APPEND_ONLY' bin/standalone-acceptance.txt
           grep -F 'PASS V2_INDEPENDENT_CLUSTER_RECOVERY' bin/standalone-acceptance.txt
           grep -F 'PASS V2_INDEPENDENT_SOURCE_UNCHANGED' bin/standalone-acceptance.txt
       - if: always()
