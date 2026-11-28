@@ -4,8 +4,11 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -68,10 +71,18 @@ func newGateway(host, target string, roots *x509.CertPool) (*gateway, error) {
 }
 
 func reject(w http.ResponseWriter, status int, code string) {
+	var raw [16]byte
+	if _,err:=rand.Read(raw[:]); err!=nil {
+		// Fail closed if the OS cannot supply a request identifier.
+		w.WriteHeader(http.StatusServiceUnavailable)
+		return
+	}
+	id:=hex.EncodeToString(raw[:])
 	w.Header().Set("Content-Type","application/json")
 	w.Header().Set("Cache-Control","no-store")
+	w.Header().Set("X-Request-ID",id)
 	w.WriteHeader(status)
-	fmt.Fprintf(w, "{\"version\":\"v2\",\"error\":{\"code\":%q}}\n",code)
+	fmt.Fprintf(w, "{\"version\":\"v2\",\"request_id\":%q,\"error\":{\"code\":%q}}\n",id,code)
 }
 
 func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -124,7 +135,7 @@ func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		reject(w,503,"unavailable"); return
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body,maxReply+1))
-	if err != nil || len(data)>maxReply { reject(w,503,"unavailable"); return }
+	if err != nil || len(data)>maxReply || !json.Valid(data) { reject(w,503,"unavailable"); return }
 	w.Header().Set("Content-Type","application/json; charset=utf-8")
 	if id := resp.Header.Get("X-Request-ID"); len(id) <= 64 && id != "" { w.Header().Set("X-Request-ID",id) }
 	if retry := resp.Header.Get("Retry-After"); len(retry) <= 64 && retry != "" { w.Header().Set("Retry-After",retry) }
