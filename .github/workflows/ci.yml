@@ -2,9 +2,9 @@ name: CheZhi License CI
 
 on:
   pull_request:
-    branches: [main, feature/p6-termux-staging, feature/m5-m6-local-api-gateway]
+    branches: [main, feature/p6-termux-staging, feature/m5-m6-local-api-gateway, feature/m5-m6-reliability]
   push:
-    branches: [main]
+    branches: [main, feature/m7-maintenance-lifecycle]
   workflow_dispatch:
     inputs:
       enforce_dashboard_slo:
