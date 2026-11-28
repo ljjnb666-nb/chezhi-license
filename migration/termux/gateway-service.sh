@@ -62,6 +62,10 @@ done
 lease_free() { flock -n "$ctl/$1.lock" true; }
 case "$1" in
     start)
+        # Both versions use the same fixed loopback port. Never start V2
+        # alongside a possibly active V1 tree; operator must review it.
+        legacy="$HOME/.chezhi-gateway-local-v1"
+        [ ! -e "$legacy" ] && [ ! -L "$legacy" ] || die 'Legacy controller tree present; reviewed maintenance required.'
         verify_code
         verify_credentials
         # The runsv process itself inherits FD 9, not a flock parent.
