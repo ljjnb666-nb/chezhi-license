@@ -27,7 +27,7 @@ if [ "$1" = install ]; then
         (cd "$here" && sha256sum "$name") | grep -Fxq -f - "$here/SHA256SUMS" || die 'Candidate hash mismatch.'
     done
     mkdir -m 700 "$ctl"
-    mkdir -m 700 "$ctl/code" "$ctl/credentials" "$ctl/service" "$ctl/service/log" "$ctl/log"
+    mkdir -m 700 "$ctl/code" "$ctl/credentials" "$ctl/service" "$ctl/service/log" "$ctl/log" "$ctl/status"
     cp -- "$here/chezhi-gateway-android-arm64" "$here/gateway-service.sh" "$ctl/code/"
     chmod 700 "$ctl/code/chezhi-gateway-android-arm64" "$ctl/code/gateway-service.sh"
     (cd "$ctl/code" && sha256sum chezhi-gateway-android-arm64 gateway-service.sh > SHA256SUMS)
@@ -41,7 +41,7 @@ if [ "$1" = install ]; then
     printf '%s\n' 'Installed local-only controller. Provision independent test TLS cert/key (0600) in credentials before explicit foreground start.'
     exit 0
 fi
-private_dir "$ctl" && private_dir "$ctl/code" && private_dir "$ctl/credentials" && private_dir "$ctl/service" && private_dir "$ctl/service/log" && private_dir "$ctl/log" || die 'Invalid private controller tree.'
+private_dir "$ctl" && private_dir "$ctl/code" && private_dir "$ctl/credentials" && private_dir "$ctl/service" && private_dir "$ctl/service/log" && private_dir "$ctl/log" && private_dir "$ctl/status" || die 'Invalid private controller tree.'
 [ -f "$ctl/installed" ] && [ ! -L "$ctl/installed" ] && [ "$(cat "$ctl/installed")" = gateway-local-v2 ] || die 'Controller not installed.'
 verify_code() {
     for name in chezhi-gateway-android-arm64 gateway-service.sh; do
@@ -123,6 +123,7 @@ case "$1" in
             CHEZHI_GATEWAY_ORIGIN_CA="$origin_cert" \
             CHEZHI_GATEWAY_TLS_CERT="$ctl/credentials/tls-cert" \
             CHEZHI_GATEWAY_TLS_KEY="$ctl/credentials/tls-key" \
+            CHEZHI_GATEWAY_STATUS_DIR="$ctl/status" \
             "$ctl/code/chezhi-gateway-android-arm64"
         ;;
     *) die 'Unknown controller command.';;
