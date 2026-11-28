@@ -34,6 +34,7 @@ pg_restore -f /dev/null "$work/database.dump"
 (cd "$work" && sha256sum database.dump > SHA256SUMS)
 printf '%s\n' 'decrypted and fully decoded logical archive; actual restore not verified' > "$work/NOTICE"
 [ ! -e "$target" ] && [ ! -L "$target" ] || die 'Output appeared.'
-mv -T -- "$work" "$target"
+mv -nT -- "$work" "$target"
+[ ! -e "$work" ] || die 'Output collision; existing target preserved.'
 trap - EXIT
 printf 'ENCRYPTED_RECEIVE_OK authenticated decryption and full decode; no database restore\n'
