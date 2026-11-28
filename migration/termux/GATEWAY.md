@@ -670,3 +670,38 @@ database is in the same disposable PG17 container; existing PG18
 encrypted fixture remains independent. Fresh roles/config/TLS
 reconstruction and real off-device disaster recovery are outstanding.
 No physical phone or public endpoint changes.
+
+### Independent PostgreSQL cluster recovery candidate
+
+CI 46132554816 (head ce99dcd, checkout e041120) passed the standalone
+V2_ENCRYPTED_RECOVERY gate with 0.862s verified recovery for the tiny
+synthetic same-cluster fixture; this is not a production RTO.
+The full workflow was 12/13: both strict capacity profiles still
+missed the 100k overview target (598.0/585.1ms), despite all four
+mixed phases passing. Keep the failure and the frozen PR #10.
+
+The follow-up extends the enabled synthetic standalone recovery
+to a separate fresh PG18 container with loopback-only dynamic
+host port, verifies different cluster identifier, major version
+and empty public schema before restoration. Restore the same
+verified decrypted dump bytes; create fresh bootstrap migrator
+and restricted runtime role credentials; apply the checked-in
+runtime grants. Generate fresh local TLS and CSRF inputs and build
+a minimal service environment with recovered signing key only.
+Require migrator/runtime checks, runtime recovery-command denial,
+pre-reset startup denial, overprivileged service startup denial,
+reset of old sessions/challenges, preserved card/order/binding
+and signing-history data, new scope with unchanged signing
+public key, old cookie/challenge rejection, fresh owner login,
+independently verified renewal, revocation and downgrade denial.
+Compare source business state before/after. Require both explicit
+independent recovery and source-unchanged markers in CI.
+The separate disposable cluster is removed in finally; the test
+uses the existing temporary receiver key and in-memory dump.
+The PG18 image is the existing compatibility tag, not a pinned
+release image. The bootstrap role is privileged; the application
+uses the restricted runtime role. Fixture role passwords are
+random and temporary, not production credentials. No real
+physical host transfer, production key backup, signed release,
+or actual phone restore; no changes to application SQL or
+capacity gates. New candidate remains pending CI.
